@@ -4,6 +4,7 @@
     xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
     xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
     xmlns:controls="using:Twinleaf.Controls"
+    xmlns:models="using:Twinleaf.Models"
     xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
     xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
     mc:Ignorable="d">
@@ -27,7 +28,11 @@
                 Text="Twinleaf" />
         </Grid>
 
-        <!-- Toolbar -->
+        <!--
+            Toolbar, following the GTK app's header bar: the sidebar toggle is
+            the one leading control and everything else is right-aligned, with
+            Open / Save As / Export in a menu rather than as separate buttons.
+        -->
         <CommandBar
             Grid.Row="1"
             DefaultLabelPosition="Right"
@@ -35,54 +40,111 @@
             OverflowButtonVisibility="Collapsed">
 
             <CommandBar.Content>
-                <StackPanel
-                    Orientation="Horizontal"
-                    Spacing="8"
+                <ToggleButton
+                    x:Name="SidebarToggle"
                     Margin="12,0,0,0"
-                    VerticalAlignment="Center">
-
-                    <ComboBox
-                        x:Name="DeviceCombo"
-                        MinWidth="320"
-                        PlaceholderText="No devices found"
-                        ToolTipService.ToolTip="Discovered devices (serial and network)" />
-
-                    <TextBox
-                        x:Name="UrlBox"
-                        MinWidth="220"
-                        PlaceholderText="or a URL, e.g. udp://127.0.0.1:7855"
-                        ToolTipService.ToolTip="Connect to an explicit Twinleaf URL" />
-
-                    <Button x:Name="ConnectButton" Click="OnConnectClicked" Style="{StaticResource AccentButtonStyle}">
-                        <StackPanel Orientation="Horizontal" Spacing="6">
-                            <FontIcon FontSize="14" Glyph="&#xE8C8;" />
-                            <TextBlock x:Name="ConnectButtonText" Text="Connect" />
-                        </StackPanel>
-                    </Button>
-                </StackPanel>
+                    Click="OnSidebarToggled"
+                    IsChecked="True"
+                    ToolTipService.ToolTip="Show or hide the sidebar">
+                    <FontIcon FontSize="16" Glyph="&#xE700;" />
+                </ToggleButton>
             </CommandBar.Content>
 
-            <AppBarButton x:Name="RefreshButton" Click="OnRefreshClicked" Icon="Refresh" Label="Refresh" />
-            <AppBarSeparator />
-            <AppBarButton x:Name="OpenButton" Click="OnOpenLogClicked" Icon="OpenFile" Label="Open" />
-            <AppBarButton x:Name="SaveButton" Click="OnSaveClicked" Icon="Save" Label="Save" />
-            <AppBarButton x:Name="SaveAsButton" Click="OnSaveAsClicked" Label="Save As">
+            <!-- Connect: discovered devices plus a URL field, as GTK's device popover -->
+            <AppBarButton x:Name="ConnectButton" Label="Connect">
                 <AppBarButton.Icon>
-                    <FontIcon Glyph="&#xE792;" />
+                    <FontIcon Glyph="&#xE8C8;" />
+                </AppBarButton.Icon>
+                <AppBarButton.Flyout>
+                    <Flyout x:Name="ConnectFlyout">
+                        <StackPanel Width="360" Spacing="8">
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="Connect to a device" />
+
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBlock
+                                    Grid.Column="0"
+                                    VerticalAlignment="Center"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Style="{StaticResource CaptionTextBlockStyle}"
+                                    Text="Discovered" />
+                                <Button
+                                    Grid.Column="1"
+                                    Padding="6,2"
+                                    Click="OnRefreshClicked"
+                                    ToolTipService.ToolTip="Re-scan for devices">
+                                    <FontIcon FontSize="12" Glyph="&#xE72C;" />
+                                </Button>
+                            </Grid>
+
+                            <ListView
+                                x:Name="DeviceList"
+                                MaxHeight="180"
+                                DoubleTapped="OnDeviceListDoubleTapped"
+                                SelectionMode="Single">
+                                <ListView.ItemTemplate>
+                                    <DataTemplate x:DataType="models:AvailableDevice">
+                                        <StackPanel Padding="0,4">
+                                            <TextBlock Text="{x:Bind Label}" />
+                                            <TextBlock
+                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                Style="{StaticResource CaptionTextBlockStyle}"
+                                                Text="{x:Bind Url}" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ListView.ItemTemplate>
+                            </ListView>
+
+                            <TextBlock
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Style="{StaticResource CaptionTextBlockStyle}"
+                                Text="Or a URL" />
+
+                            <Grid ColumnSpacing="8">
+                                <Grid.ColumnDefinitions>
+                                    <ColumnDefinition Width="*" />
+                                    <ColumnDefinition Width="Auto" />
+                                </Grid.ColumnDefinitions>
+                                <TextBox
+                                    x:Name="UrlBox"
+                                    Grid.Column="0"
+                                    PlaceholderText="udp://127.0.0.1:7855" />
+                                <Button
+                                    x:Name="ConnectConfirmButton"
+                                    Grid.Column="1"
+                                    Click="OnConnectClicked"
+                                    Content="Connect"
+                                    Style="{StaticResource AccentButtonStyle}" />
+                            </Grid>
+                        </StackPanel>
+                    </Flyout>
+                </AppBarButton.Flyout>
+            </AppBarButton>
+
+            <AppBarButton x:Name="DisconnectButton" Click="OnDisconnectClicked" Label="Disconnect" Visibility="Collapsed">
+                <AppBarButton.Icon>
+                    <FontIcon Glyph="&#xE8CB;" />
                 </AppBarButton.Icon>
             </AppBarButton>
+
             <AppBarSeparator />
-            <AppBarToggleButton x:Name="RecordButton" Click="OnRecordClicked" Label="Record">
-                <AppBarToggleButton.Icon>
-                    <FontIcon Glyph="&#xE7C8;" />
-                </AppBarToggleButton.Icon>
-            </AppBarToggleButton>
+
             <AppBarToggleButton x:Name="PauseButton" Click="OnPauseClicked" Label="Pause">
                 <AppBarToggleButton.Icon>
                     <FontIcon Glyph="&#xE769;" />
                 </AppBarToggleButton.Icon>
             </AppBarToggleButton>
+            <AppBarToggleButton x:Name="RecordButton" Click="OnRecordClicked" Label="Record">
+                <AppBarToggleButton.Icon>
+                    <FontIcon Glyph="&#xE7C8;" />
+                </AppBarToggleButton.Icon>
+            </AppBarToggleButton>
+
             <AppBarSeparator />
+
             <AppBarButton x:Name="ModeButton" Label="Mode">
                 <AppBarButton.Icon>
                     <FontIcon Glyph="&#xE9D2;" />
@@ -113,43 +175,126 @@
                     <MenuFlyout x:Name="WindowFlyout" />
                 </AppBarButton.Flyout>
             </AppBarButton>
+
+            <AppBarButton x:Name="MenuButton" Label="Menu">
+                <AppBarButton.Icon>
+                    <FontIcon Glyph="&#xE700;" />
+                </AppBarButton.Icon>
+                <AppBarButton.Flyout>
+                    <MenuFlyout>
+                        <MenuFlyoutItem Click="OnOpenLogClicked" Text="Open…">
+                            <MenuFlyoutItem.Icon>
+                                <FontIcon Glyph="&#xE8E5;" />
+                            </MenuFlyoutItem.Icon>
+                        </MenuFlyoutItem>
+                        <MenuFlyoutItem x:Name="SaveMenuItem" Click="OnSaveClicked" Text="Save">
+                            <MenuFlyoutItem.Icon>
+                                <FontIcon Glyph="&#xE74E;" />
+                            </MenuFlyoutItem.Icon>
+                        </MenuFlyoutItem>
+                        <MenuFlyoutItem x:Name="SaveAsMenuItem" Click="OnSaveAsClicked" Text="Save As…">
+                            <MenuFlyoutItem.Icon>
+                                <FontIcon Glyph="&#xE792;" />
+                            </MenuFlyoutItem.Icon>
+                        </MenuFlyoutItem>
+                        <MenuFlyoutSeparator />
+                        <MenuFlyoutItem x:Name="ExportMenuItem" Click="OnExportClicked" Text="Export…">
+                            <MenuFlyoutItem.Icon>
+                                <FontIcon Glyph="&#xEDE1;" />
+                            </MenuFlyoutItem.Icon>
+                        </MenuFlyoutItem>
+                        <MenuFlyoutItem x:Name="CopyDataMenuItem" Click="OnCopyDataClicked" Text="Copy plotted data">
+                            <MenuFlyoutItem.Icon>
+                                <FontIcon Glyph="&#xE8C8;" />
+                            </MenuFlyoutItem.Icon>
+                        </MenuFlyoutItem>
+                    </MenuFlyout>
+                </AppBarButton.Flyout>
+            </AppBarButton>
         </CommandBar>
 
         <!-- Sidebar + plot -->
         <Grid Grid.Row="2">
             <Grid.ColumnDefinitions>
-                <ColumnDefinition x:Name="SidebarColumn" Width="300" MinWidth="220" />
+                <ColumnDefinition x:Name="SidebarColumn" Width="320" MinWidth="240" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" MinWidth="320" />
-                <ColumnDefinition Width="Auto" />
-                <ColumnDefinition x:Name="SettingsColumn" Width="340" MinWidth="260" />
             </Grid.ColumnDefinitions>
 
-            <!-- Channel sidebar: device > stream > column, ticked to plot -->
-            <Grid Grid.Column="0">
+            <!--
+                One sidebar, grouped per device: that device's streams and
+                channels, then its settings. Mirrors the GTK app, where settings
+                sit inline with the streams they belong to rather than in a
+                separate panel.
+            -->
+            <Grid x:Name="SidebarPanel" Grid.Column="0">
                 <Grid.RowDefinitions>
                     <RowDefinition Height="Auto" />
                     <RowDefinition Height="*" />
                 </Grid.RowDefinitions>
 
-                <TextBlock
+                <AutoSuggestBox
+                    x:Name="SidebarSearch"
                     Grid.Row="0"
-                    Margin="12,8"
-                    Style="{StaticResource BodyStrongTextBlockStyle}"
-                    Text="Channels" />
+                    Margin="12,8,8,8"
+                    PlaceholderText="Search channels and settings"
+                    QueryIcon="Find"
+                    TextChanged="OnSidebarSearchChanged" />
 
-                <TreeView
-                    x:Name="ChannelTree"
+                <TextBlock
+                    x:Name="SidebarEmptyText"
                     Grid.Row="1"
-                    Margin="4,0,4,8"
+                    Margin="12,8,12,0"
+                    VerticalAlignment="Top"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Style="{StaticResource CaptionTextBlockStyle}"
+                    Text="Connect a Twinleaf device, or open a .tio log."
+                    TextWrapping="Wrap" />
+
+                <ListView
+                    x:Name="SidebarList"
+                    Grid.Row="1"
+                    Margin="0,0,0,8"
                     SelectionMode="None">
-                    <TreeView.ItemTemplate>
-                        <DataTemplate x:DataType="controls:ChannelNode">
-                            <TreeViewItem
-                                AutomationProperties.Name="{x:Bind Title, Mode=OneWay}"
-                                IsExpanded="{x:Bind IsExpanded}"
-                                ItemsSource="{x:Bind Children}">
-                                <Grid ColumnSpacing="8">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="Padding" Value="8,1" />
+                            <Setter Property="MinHeight" Value="0" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="controls:SidebarRow">
+                            <Grid>
+                                <!-- Device name -->
+                                <TextBlock
+                                    Margin="0,10,0,0"
+                                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                                    Text="{x:Bind Title, Mode=OneWay}"
+                                    Visibility="{x:Bind DeviceHeaderVisibility}" />
+
+                                <!-- Serial number -->
+                                <TextBlock
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Style="{StaticResource CaptionTextBlockStyle}"
+                                    Text="{x:Bind Title, Mode=OneWay}"
+                                    Visibility="{x:Bind SubtitleVisibility}" />
+
+                                <!-- Stream heading, or "Settings" -->
+                                <TextBlock
+                                    Margin="8,8,0,2"
+                                    FontWeight="SemiBold"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Style="{StaticResource CaptionTextBlockStyle}"
+                                    Text="{x:Bind Title, Mode=OneWay}"
+                                    Visibility="{x:Bind SectionHeaderVisibility}" />
+
+                                <!-- Channel: tick to plot, with a live reading -->
+                                <Grid
+                                    Margin="16,0,0,0"
+                                    ColumnSpacing="8"
+                                    Visibility="{x:Bind ChannelVisibility}">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="Auto" />
                                         <ColumnDefinition Width="*" />
@@ -159,11 +304,11 @@
                                     <CheckBox
                                         Grid.Column="0"
                                         MinWidth="0"
+                                        AutomationProperties.Name="{x:Bind Title, Mode=OneWay}"
                                         Checked="OnChannelChecked"
-                                        Unchecked="OnChannelChecked"
                                         IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
                                         Tag="{x:Bind}"
-                                        Visibility="{x:Bind CheckboxVisibility}" />
+                                        Unchecked="OnChannelChecked" />
 
                                     <TextBlock
                                         Grid.Column="1"
@@ -180,110 +325,15 @@
                                         Style="{StaticResource CaptionTextBlockStyle}"
                                         Text="{x:Bind Value, Mode=OneWay}" />
                                 </Grid>
-                            </TreeViewItem>
-                        </DataTemplate>
-                    </TreeView.ItemTemplate>
-                </TreeView>
-            </Grid>
 
-            <controls:SplitterThumb
-                x:Name="SidebarSplitter"
-                Grid.Column="1"
-                TargetColumn="{x:Bind SidebarColumn}" />
-
-            <!-- Plot -->
-            <controls:PlotView x:Name="Plot" Grid.Column="2" Margin="0,0,8,8" />
-
-            <controls:SplitterThumb
-                x:Name="SettingsSplitter"
-                Grid.Column="3"
-                Invert="True"
-                TargetColumn="{x:Bind SettingsColumn}" />
-
-            <!-- Settings sidebar: device RPCs, one row per setting -->
-            <Grid Grid.Column="4">
-                <Grid.RowDefinitions>
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="Auto" />
-                    <RowDefinition Height="*" />
-                </Grid.RowDefinitions>
-
-                <Grid Grid.Row="0" Margin="12,8,8,4">
-                    <Grid.ColumnDefinitions>
-                        <ColumnDefinition Width="*" />
-                        <ColumnDefinition Width="Auto" />
-                    </Grid.ColumnDefinitions>
-
-                    <TextBlock
-                        Grid.Column="0"
-                        VerticalAlignment="Center"
-                        Style="{StaticResource BodyStrongTextBlockStyle}"
-                        Text="Settings" />
-
-                    <!--
-                        Only offered once the device says its cached values went
-                        stale; re-reading every setting unprompted is a lot of
-                        RPC traffic on a large device.
-                    -->
-                    <Button
-                        x:Name="ReloadRpcsButton"
-                        Grid.Column="1"
-                        Padding="6,2"
-                        Click="OnReloadRpcsClicked"
-                        ToolTipService.ToolTip="Reload all readable setting values"
-                        Visibility="Collapsed">
-                        <FontIcon FontSize="14" Glyph="&#xE72C;" />
-                    </Button>
-                </Grid>
-
-                <AutoSuggestBox
-                    x:Name="SettingsSearch"
-                    Grid.Row="1"
-                    Margin="12,0,8,8"
-                    PlaceholderText="Search settings"
-                    QueryIcon="Find"
-                    TextChanged="OnSettingsSearchChanged" />
-
-                <TextBlock
-                    x:Name="SettingsEmptyText"
-                    Grid.Row="2"
-                    Margin="12,16,12,0"
-                    VerticalAlignment="Top"
-                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                    Style="{StaticResource CaptionTextBlockStyle}"
-                    Text="Connect a Twinleaf device to list settings."
-                    TextWrapping="Wrap" />
-
-                <ListView
-                    x:Name="SettingsList"
-                    Grid.Row="2"
-                    Margin="0,0,0,8"
-                    SelectionMode="None">
-                    <ListView.ItemContainerStyle>
-                        <Style TargetType="ListViewItem">
-                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
-                            <Setter Property="Padding" Value="8,2" />
-                            <Setter Property="MinHeight" Value="0" />
-                        </Style>
-                    </ListView.ItemContainerStyle>
-
-                    <ListView.ItemTemplate>
-                        <DataTemplate x:DataType="controls:SettingRow">
-                            <Grid>
-                                <!-- Device grouping header -->
-                                <TextBlock
-                                    Margin="4,10,0,2"
-                                    Style="{StaticResource CaptionTextBlockStyle}"
-                                    FontWeight="SemiBold"
-                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
-                                    Text="{x:Bind Title, Mode=OneWay}"
-                                    Visibility="{x:Bind HeaderVisibility}" />
-
-                                <!-- Setting row: name on the left, control on the right -->
-                                <Grid ColumnSpacing="8" Visibility="{x:Bind SettingVisibility}">
+                                <!-- Setting: name plus the control its type implies -->
+                                <Grid
+                                    Margin="16,0,0,0"
+                                    ColumnSpacing="8"
+                                    Visibility="{x:Bind SettingVisibility}">
                                     <Grid.ColumnDefinitions>
                                         <ColumnDefinition Width="*" />
-                                        <ColumnDefinition Width="128" />
+                                        <ColumnDefinition Width="124" />
                                     </Grid.ColumnDefinitions>
 
                                     <TextBlock
@@ -343,6 +393,7 @@
                                             Style="{StaticResource CaptionTextBlockStyle}"
                                             Text="{x:Bind ReadOnlyText, Mode=OneWay}"
                                             TextTrimming="CharacterEllipsis"
+                                            ToolTipService.ToolTip="{x:Bind ReadOnlyText, Mode=OneWay}"
                                             Visibility="{x:Bind ReadOnlyVisibility}" />
                                     </Grid>
                                 </Grid>
@@ -351,6 +402,13 @@
                     </ListView.ItemTemplate>
                 </ListView>
             </Grid>
+
+            <controls:SplitterThumb
+                x:Name="SidebarSplitter"
+                Grid.Column="1"
+                TargetColumn="{x:Bind SidebarColumn}" />
+
+            <controls:PlotView x:Name="Plot" Grid.Column="2" Margin="0,0,8,8" />
         </Grid>
 
         <!-- Playback scrubber, for an opened .tio -->

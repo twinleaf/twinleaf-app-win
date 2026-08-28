@@ -10,6 +10,7 @@ using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
 using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
+using Windows.ApplicationModel.DataTransfer;
 using Windows.Storage.Pickers;
 using WinRT.Interop;
 using Twinleaf.Controls;
@@ -19,19 +20,39 @@ using Twinleaf.Models;
 namespace Twinleaf;
 
 /// <summary>
-/// The main window: device picker, channel sidebar and plot, mirroring the
-/// layout of the macOS app's main scene.
+/// The main window. Layout follows the GTK app: one sidebar grouped per device
+/// carrying that device's channels <em>and</em> its settings, a plot, and a
+/// header where the sidebar toggle is the only leading control and file
+/// commands live in a menu.
 /// </summary>
 public sealed partial class MainWindow : Window
 {
     private readonly BridgeClient _client;
-    private readonly ObservableCollection<ChannelNode> _channelRoots = [];
 
-    /// <summary>Column rows by key, so a stream-values event updates in O(1).</summary>
-    private readonly Dictionary<ColumnKey, ChannelNode> _columnNodes = [];
+    /// <summary>Channels and settings in one flat, per-device grouped list.</summary>
+    private readonly ObservableCollection<SidebarRow> _sidebarRows = [];
+
+    /// <summary>Rows by column key, so a stream-values event updates in O(1).</summary>
+    private readonly Dictionary<ColumnKey, SidebarRow> _channelRows = [];
+
+    /// <summary>Rows by RPC id, so a readback updates in O(1).</summary>
+    private readonly Dictionary<string, SidebarRow> _settingRows = [];
+
+    private TioDocument _document = new();
 
     private bool _isPaused;
-    private bool _suppressChannelEvents;
+    private bool _suppressRowEvents;
+    private bool _suppressPlaybackEvents;
+    private string _sidebarQuery = string.Empty;
+
+    /// <summary>Format used for the last export, so the next one defaults to it.</summary>
+    private ExportFormat _lastExportFormat = ExportFormat.Csv;
+
+    /// <summary>In-flight export requests, so a result can name its destination.</summary>
+    private readonly Dictionary<string, string> _pendingExports = [];
+
+    /// <summary>In-flight clipboard requests.</summary>
+    private readonly HashSet<string> _pendingCopies = [];
 
     public MainWindow()
     {
@@ -44,19 +65,16 @@ public sealed partial class MainWindow : Window
         _client = new BridgeClient(DispatcherQueue);
         _client.PropertyChanged += (_, _) => DispatcherQueue.TryEnqueue(UpdateChrome);
         _client.AvailableDevices.CollectionChanged += OnAvailableDevicesChanged;
-        _client.ConnectedDevices.CollectionChanged += (_, _) =>
-        {
-            RebuildChannelTree();
-            RebuildSettingsList();
-        };
+        _client.ConnectedDevices.CollectionChanged += (_, _) => RebuildSidebar();
         _client.StreamValuesUpdated += UpdateChannelValues;
         _client.SelectionChanged += SyncChannelSelection;
         _client.PlotFrameReceived += OnPlotFrame;
         _client.RpcValueUpdated += OnRpcValueUpdated;
         _client.PlaybackChanged += OnPlaybackChanged;
+        _client.ExportResultReceived += OnExportResult;
+        _client.ViewDataReceived += OnViewData;
 
-        ChannelTree.ItemsSource = _channelRoots;
-        SettingsList.ItemsSource = _settingRows;
+        SidebarList.ItemsSource = _sidebarRows;
         Plot.LabelProvider = LabelFor;
 
         BuildWindowMenu();
@@ -82,8 +100,8 @@ public sealed partial class MainWindow : Window
     // Headless self-test
     //
     // Mirrors the GTK sibling's TWINLEAF_SELFTEST_* hooks so CI can drive a
-    // real connect-and-plot cycle against the simulator without a human at the
-    // keyboard. Inert unless the variables are set.
+    // real session against the simulator without a human at the keyboard.
+    // Inert unless the variables are set.
     // -----------------------------------------------------------------
 
     private void StartSelfTestIfRequested()
@@ -92,11 +110,7 @@ public sealed partial class MainWindow : Window
         if (!string.IsNullOrWhiteSpace(target))
         {
             UrlBox.Text = target;
-            _client.Connect(target.Trim());
-
-            // Tick the first available column once metadata lands, so the test
-            // exercises the plot path and not just the connection.
-            _client.ConnectedDevices.CollectionChanged += SelfTestSelectFirstColumn;
+            _client.Connect(target.Trim(), logPath: _document.TemporaryPath);
         }
 
         // TWINLEAF_SELFTEST_OPEN=<path> opens a saved .tio for inspection.
@@ -113,8 +127,7 @@ public sealed partial class MainWindow : Window
         }
 
         // TWINLEAF_SELFTEST_RPC="name=value[,name=value]" writes settings once
-        // metadata lands and logs the device's replies, so an RPC round trip can
-        // be verified without a human at the keyboard.
+        // metadata lands and logs the device's replies.
         var rpcScript = Environment.GetEnvironmentVariable("TWINLEAF_SELFTEST_RPC");
         if (!string.IsNullOrWhiteSpace(rpcScript))
         {
@@ -124,6 +137,13 @@ public sealed partial class MainWindow : Window
                     $"value={result.Value?.ToString() ?? "null"} error={result.ErrorMessage ?? "-"}");
 
             _client.ConnectedDevices.CollectionChanged += (_, _) => SelfTestRunRpcScript(rpcScript);
+        }
+
+        // TWINLEAF_SELFTEST_EXPORT=<path> exports once data is available.
+        var exportPath = Environment.GetEnvironmentVariable("TWINLEAF_SELFTEST_EXPORT");
+        if (!string.IsNullOrWhiteSpace(exportPath))
+        {
+            _selfTestExportPath = exportPath.Trim();
         }
 
         var quitAfter = Environment.GetEnvironmentVariable("TWINLEAF_SELFTEST_QUIT");
@@ -137,20 +157,33 @@ public sealed partial class MainWindow : Window
             timer.IsRepeating = false;
             timer.Tick += (_, _) =>
             {
+                if (_selfTestExportPath is { } path)
+                {
+                    AppLog.Error($"[selftest] exporting to {path}");
+                    StartExport(path, FormatFromExtension(path));
+                    // Give the export a moment to finish before exiting.
+                    _selfTestExportPath = null;
+                    timer.Interval = TimeSpan.FromSeconds(10);
+                    timer.Start();
+                    return;
+                }
+
                 AppLog.Error(
-                    $"[selftest] quitting after {seconds}s; frames={_selfTestFrameCount} " +
-                    $"sawData={_selfTestSawData} selected={_client.SelectedColumns.Count} " +
-                    $"devices={_client.ConnectedDevices.Count} phase={_client.Phase}");
+                    $"[selftest] quitting; frames={_selfTestFrameCount} sawData={_selfTestSawData} " +
+                    $"selected={_client.SelectedColumns.Count} devices={_client.ConnectedDevices.Count} " +
+                    $"phase={_client.Phase}");
                 Console.Error.Flush();
-                // Close() only dismisses the window; Exit() ends the process,
-                // which is what an unattended run needs.
                 Application.Current.Exit();
             };
             timer.Start();
         }
     }
 
+    private string? _selfTestExportPath;
     private bool _selfTestRpcScriptRan;
+    private int _selfTestFrameCount;
+    private bool _selfTestSawData;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _selfTestQuitTimer;
 
     /// <summary>
     /// Applies the <c>TWINLEAF_SELFTEST_RPC</c> script through the same
@@ -175,8 +208,6 @@ public sealed partial class MainWindow : Window
             }
 
             var name = parts[0].Trim();
-            var text = parts[1].Trim();
-
             var rpc = _client.ConnectedDevices
                 .SelectMany(device => device.Rpcs)
                 .FirstOrDefault(candidate => candidate.Name == name);
@@ -187,47 +218,30 @@ public sealed partial class MainWindow : Window
                 continue;
             }
 
-            var request = _client.WriteRpc(rpc, text);
+            var request = _client.WriteRpc(rpc, parts[1].Trim());
             AppLog.Error(
-                $"[selftest] write {name}={text} (type {rpc.ArgType}) -> " +
+                $"[selftest] write {name}={parts[1].Trim()} (type {rpc.ArgType}) -> " +
                 (request is null ? "REJECTED by coercion" : $"sent as {request}"));
         }
-    }
-
-    private int _selfTestFrameCount;
-    private bool _selfTestSawData;
-    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _selfTestQuitTimer;
-
-    private void SelfTestSelectFirstColumn(object? sender, NotifyCollectionChangedEventArgs e)
-    {
-        var first = _client.ConnectedDevices
-            .SelectMany(device => device.Streams)
-            .SelectMany(stream => stream.Columns)
-            .FirstOrDefault();
-
-        if (first is null || _client.SelectedColumns.Count > 0)
-        {
-            return;
-        }
-
-        AppLog.Error($"[selftest] selecting {first.Key}");
-        _client.ToggleColumn(first.Key);
     }
 
     // -----------------------------------------------------------------
     // Toolbar
     // -----------------------------------------------------------------
 
+    private void OnSidebarToggled(object sender, RoutedEventArgs e)
+    {
+        var show = SidebarToggle.IsChecked == true;
+        SidebarPanel.Visibility = show ? Visibility.Visible : Visibility.Collapsed;
+        SidebarSplitter.Visibility = SidebarPanel.Visibility;
+        SidebarColumn.Width = show ? new GridLength(320) : new GridLength(0);
+        SidebarColumn.MinWidth = show ? 240 : 0;
+    }
+
     private void OnRefreshClicked(object sender, RoutedEventArgs e) => _client.RefreshDevices();
 
     private void OnConnectClicked(object sender, RoutedEventArgs e)
     {
-        if (_client.IsConnected)
-        {
-            _client.Disconnect();
-            return;
-        }
-
         var url = ResolveTargetUrl();
         if (string.IsNullOrWhiteSpace(url))
         {
@@ -235,10 +249,16 @@ public sealed partial class MainWindow : Window
             return;
         }
 
+        ConnectFlyout.Hide();
         // The core needs the log path up front so Record can be switched on
         // mid-session without reconnecting.
         _client.Connect(url, logPath: _document.TemporaryPath);
     }
+
+    private void OnDeviceListDoubleTapped(object sender, DoubleTappedRoutedEventArgs e) =>
+        OnConnectClicked(sender, e);
+
+    private void OnDisconnectClicked(object sender, RoutedEventArgs e) => _client.Disconnect();
 
     /// <summary>An explicitly typed URL wins over the picker selection.</summary>
     private string? ResolveTargetUrl()
@@ -249,7 +269,7 @@ public sealed partial class MainWindow : Window
             return typed;
         }
 
-        return (DeviceCombo.SelectedItem as AvailableDevice)?.Url;
+        return (DeviceList.SelectedItem as AvailableDevice)?.Url;
     }
 
     private void OnRecordClicked(object sender, RoutedEventArgs e)
@@ -270,13 +290,12 @@ public sealed partial class MainWindow : Window
 
     private void OnModeSelected(object sender, RoutedEventArgs e)
     {
-        if (sender is not RadioMenuFlyoutItem item || item.Tag is not string tag)
+        if (sender is not RadioMenuFlyoutItem { Tag: string tag })
         {
             return;
         }
 
-        var mode = tag == "Fft" ? PlotMode.Fft : PlotMode.Timeseries;
-        _client.UpdateView(view => view with { Mode = mode });
+        _client.UpdateView(view => view with { Mode = tag == "Fft" ? PlotMode.Fft : PlotMode.Timeseries });
         Plot.UpdateView(_client.View);
     }
 
@@ -298,6 +317,7 @@ public sealed partial class MainWindow : Window
                 {
                     _client.UpdateView(view => view with { WindowSeconds = value });
                     Plot.UpdateView(_client.View);
+                    OnPlaybackChanged();
                 }
             };
 
@@ -319,164 +339,25 @@ public sealed partial class MainWindow : Window
     {
         // Preserve the selection across a discovery refresh; the list is
         // replaced wholesale whenever the reachable set changes.
-        var selectedUrl = (DeviceCombo.SelectedItem as AvailableDevice)?.Url;
+        var selectedUrl = (DeviceList.SelectedItem as AvailableDevice)?.Url;
 
-        DeviceCombo.ItemsSource = _client.AvailableDevices.ToList();
-        DeviceCombo.DisplayMemberPath = nameof(AvailableDevice.Label);
+        DeviceList.ItemsSource = _client.AvailableDevices.ToList();
 
         if (selectedUrl is not null)
         {
-            DeviceCombo.SelectedItem = _client.AvailableDevices
+            DeviceList.SelectedItem = _client.AvailableDevices
                 .FirstOrDefault(device => device.Url == selectedUrl);
         }
 
-        if (DeviceCombo.SelectedItem is null && _client.AvailableDevices.Count > 0)
+        if (DeviceList.SelectedItem is null && _client.AvailableDevices.Count > 0)
         {
-            DeviceCombo.SelectedIndex = 0;
+            DeviceList.SelectedIndex = 0;
         }
-    }
-
-    // -----------------------------------------------------------------
-    // Channel sidebar
-    // -----------------------------------------------------------------
-
-    private void RebuildChannelTree()
-    {
-        _suppressChannelEvents = true;
-        try
-        {
-            _channelRoots.Clear();
-            _columnNodes.Clear();
-
-            foreach (var device in _client.ConnectedDevices)
-            {
-                var deviceNode = new ChannelNode(
-                    device.DisplayName,
-                    $"{device.Url}  {device.Route}");
-
-                foreach (var stream in device.Streams)
-                {
-                    var rate = stream.EffectiveSamplingRate > 0
-                        ? $"{stream.EffectiveSamplingRate:0.###} Hz"
-                        : "rate unknown";
-
-                    var streamNode = new ChannelNode(stream.Name, rate);
-
-                    foreach (var column in stream.Columns)
-                    {
-                        var columnNode = new ChannelNode(
-                            column.DisplayLabel,
-                            column.Description,
-                            column.Key)
-                        {
-                            IsSelected = _client.IsSelected(column.Key),
-                        };
-
-                        _columnNodes[column.Key] = columnNode;
-                        streamNode.Children.Add(columnNode);
-                    }
-
-                    deviceNode.Children.Add(streamNode);
-                }
-
-                _channelRoots.Add(deviceNode);
-            }
-        }
-        finally
-        {
-            _suppressChannelEvents = false;
-        }
-
-        UpdateChannelValues();
-    }
-
-    private void OnChannelChecked(object sender, RoutedEventArgs e)
-    {
-        if (_suppressChannelEvents)
-        {
-            return;
-        }
-
-        if (sender is not CheckBox { Tag: ChannelNode node } || node.Key is not { } key)
-        {
-            return;
-        }
-
-        // The node's IsSelected is already updated by the two-way binding; only
-        // tell the core when the two disagree, so echoed activeColumns events
-        // do not bounce.
-        if (_client.IsSelected(key) != node.IsSelected)
-        {
-            _client.ToggleColumn(key);
-        }
-    }
-
-    /// <summary>Re-applies the core's authoritative selection to the tree.</summary>
-    private void SyncChannelSelection()
-    {
-        _suppressChannelEvents = true;
-        try
-        {
-            foreach (var (key, node) in _columnNodes)
-            {
-                node.IsSelected = _client.IsSelected(key);
-            }
-        }
-        finally
-        {
-            _suppressChannelEvents = false;
-        }
-    }
-
-    private void UpdateChannelValues()
-    {
-        foreach (var (key, value) in _client.StreamValues)
-        {
-            if (_columnNodes.TryGetValue(key, out var node))
-            {
-                node.Value = NumericDisplayPolicy.Reading(value);
-            }
-        }
-    }
-
-    private string LabelFor(ColumnKey key)
-    {
-        foreach (var device in _client.ConnectedDevices)
-        {
-            if (device.Route != key.Route)
-            {
-                continue;
-            }
-
-            foreach (var stream in device.Streams)
-            {
-                if (stream.StreamId != key.StreamId)
-                {
-                    continue;
-                }
-
-                var column = stream.Columns.FirstOrDefault(item => item.Key.ColumnIndex == key.ColumnIndex);
-                if (column is null)
-                {
-                    continue;
-                }
-
-                var label = $"{stream.Name}.{column.Name}";
-                return key.Derivation is { } derivation ? derivation.Label(label) : label;
-            }
-        }
-
-        return key.ToString();
     }
 
     // -----------------------------------------------------------------
     // .tio document
     // -----------------------------------------------------------------
-
-    private TioDocument _document = new();
-
-    /// <summary>Guards the slider against the value changes we make ourselves.</summary>
-    private bool _suppressPlaybackEvents;
 
     private async void OnOpenLogClicked(object sender, RoutedEventArgs e)
     {
@@ -487,12 +368,10 @@ public sealed partial class MainWindow : Window
         picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
 
         var file = await picker.PickSingleFileAsync();
-        if (file is null)
+        if (file is not null)
         {
-            return;
+            OpenDocument(file.Path);
         }
-
-        OpenDocument(file.Path);
     }
 
     private void OpenDocument(string path)
@@ -536,12 +415,10 @@ public sealed partial class MainWindow : Window
         picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
 
         var file = await picker.PickSaveFileAsync();
-        if (file is null)
+        if (file is not null)
         {
-            return;
+            SaveDocumentTo(file.Path);
         }
-
-        SaveDocumentTo(file.Path);
     }
 
     private void SaveDocumentTo(string path)
@@ -558,6 +435,126 @@ public sealed partial class MainWindow : Window
         }
 
         UpdateChrome();
+    }
+
+    // -----------------------------------------------------------------
+    // Export
+    // -----------------------------------------------------------------
+
+    private async void OnExportClicked(object sender, RoutedEventArgs e)
+    {
+        var picker = new FileSavePicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        // Both formats are offered; the chosen extension picks which one, the
+        // way the macOS app does it. HDF5 needs the core built with its
+        // feature, and the core says so plainly if it was not.
+        picker.FileTypeChoices.Add("CSV", [".csv"]);
+        picker.FileTypeChoices.Add("HDF5", [".h5", ".hdf5"]);
+        picker.SuggestedFileName = ExportBaseName();
+        picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
+
+        var file = await picker.PickSaveFileAsync();
+        if (file is null)
+        {
+            return;
+        }
+
+        StartExport(file.Path, FormatFromExtension(file.Path));
+    }
+
+    private void StartExport(string path, ExportFormat format)
+    {
+        if (_document.IsEmpty)
+        {
+            StatusText.Text = "Nothing to export yet — record or open a log first.";
+            return;
+        }
+
+        _lastExportFormat = format;
+
+        // Always export from the temporary log: it is the copy the core has
+        // been appending to, and for an opened document it is the one that is
+        // guaranteed to still exist.
+        var requestId = _client.ExportLog(_document.TemporaryPath, path, format);
+        _pendingExports[requestId] = path;
+        StatusText.Text = $"Exporting to {System.IO.Path.GetFileName(path)}…";
+    }
+
+    private string ExportBaseName()
+    {
+        var stem = System.IO.Path.GetFileNameWithoutExtension(_document.DisplayName);
+        return string.IsNullOrEmpty(stem) ? "Twinleaf Export" : stem;
+    }
+
+    /// <summary>Format implied by the chosen filename, falling back to the last used.</summary>
+    private ExportFormat FormatFromExtension(string path) =>
+        System.IO.Path.GetExtension(path).ToLowerInvariant() switch
+        {
+            ".csv" => ExportFormat.Csv,
+            ".h5" or ".hdf5" => ExportFormat.Hdf5,
+            _ => _lastExportFormat,
+        };
+
+    private void OnExportResult(Interop.CoreEvent.ExportResult result)
+    {
+        var destination = _pendingExports.Remove(result.RequestId, out var path)
+            ? System.IO.Path.GetFileName(path)
+            : result.OutputPath is { } output
+                ? System.IO.Path.GetFileName(output)
+                : "export";
+
+        if (!result.Ok)
+        {
+            StatusText.Text = $"Export failed: {result.ErrorMessage ?? "unknown error"}";
+            AppLog.Error($"export failed: {result.ErrorMessage}");
+            return;
+        }
+
+        var detail = result.Rows is { } rows
+            ? $"{rows:N0} rows"
+            : result.Bytes is { } bytes
+                ? FormatBytes(bytes)
+                : string.Empty;
+
+        StatusText.Text = detail.Length > 0
+            ? $"Exported {detail} to {destination}"
+            : $"Exported to {destination}";
+    }
+
+    /// <summary>Copies the plotted window as text, matching GTK's "Copy data".</summary>
+    private void OnCopyDataClicked(object sender, RoutedEventArgs e)
+    {
+        if (_client.SelectedColumns.Count == 0)
+        {
+            StatusText.Text = "Tick a channel to copy its data.";
+            return;
+        }
+
+        var requestId = _client.CopyViewData(paneId: 0, viewportEnd: null);
+        _pendingCopies.Add(requestId);
+        StatusText.Text = "Copying plotted data…";
+    }
+
+    private void OnViewData(Interop.CoreEvent.ViewData data)
+    {
+        if (!_pendingCopies.Remove(data.RequestId))
+        {
+            return;
+        }
+
+        if (!data.Ok || data.Text is not { Length: > 0 } text)
+        {
+            StatusText.Text = $"Copy failed: {data.ErrorMessage ?? "no data in the current window"}";
+            return;
+        }
+
+        var package = new DataPackage { RequestedOperation = DataPackageOperation.Copy };
+        package.SetText(text);
+        Clipboard.SetContent(package);
+
+        StatusText.Text = data.Rows is { } rows
+            ? $"Copied {rows:N0} rows to the clipboard"
+            : "Copied plotted data to the clipboard";
     }
 
     // -----------------------------------------------------------------
@@ -623,131 +620,228 @@ public sealed partial class MainWindow : Window
         var minutes = total % 3600 / 60;
         var secs = total % 60;
 
-        return hours > 0
-            ? $"{hours}:{minutes:00}:{secs:00}"
-            : $"{minutes}:{secs:00}";
+        return hours > 0 ? $"{hours}:{minutes:00}:{secs:00}" : $"{minutes}:{secs:00}";
     }
 
     // -----------------------------------------------------------------
-    // Settings sidebar (device RPCs)
+    // Sidebar
     // -----------------------------------------------------------------
 
-    private readonly ObservableCollection<SettingRow> _settingRows = [];
-
-    /// <summary>Setting rows by RPC id, so a readback updates in O(1).</summary>
-    private readonly Dictionary<string, SettingRow> _settingRowsById = [];
-
-    /// <summary>Guards against control events fired by programmatic updates.</summary>
-    private bool _suppressSettingEvents;
-
-    private string _settingsQuery = string.Empty;
-
-    private void RebuildSettingsList()
+    /// <summary>
+    /// Rebuilds the sidebar as one section per device: the device's name and
+    /// serial, then each stream with its channels, then that device's settings.
+    /// This is the GTK app's layout — settings sit with the streams they belong
+    /// to rather than in a panel of their own.
+    /// </summary>
+    private void RebuildSidebar()
     {
-        _suppressSettingEvents = true;
+        _suppressRowEvents = true;
         try
         {
+            _sidebarRows.Clear();
+            _channelRows.Clear();
             _settingRows.Clear();
-            _settingRowsById.Clear();
 
             foreach (var device in _client.ConnectedDevices)
             {
-                var matches = device.Rpcs
-                    .Where(rpc => rpc.IsVisibleInRpcList && MatchesSettingsQuery(rpc, device))
+                var streams = device.Streams
+                    .Select(stream => (Stream: stream, Columns: stream.Columns.Where(MatchesQuery).ToList()))
+                    .Where(entry => entry.Columns.Count > 0)
                     .ToList();
 
-                if (matches.Count == 0)
+                var rpcs = device.Rpcs
+                    .Where(rpc => rpc.IsVisibleInRpcList && MatchesQuery(rpc, device))
+                    .ToList();
+
+                if (streams.Count == 0 && rpcs.Count == 0)
                 {
                     continue;
                 }
 
-                // Only label the group when there is more than one device;
-                // a single device's name above every setting is just noise.
-                if (_client.ConnectedDevices.Count > 1)
+                _sidebarRows.Add(SidebarRow.DeviceHeader(device.DisplayName));
+                if (!string.IsNullOrEmpty(device.Meta.SerialNumber))
                 {
-                    _settingRows.Add(SettingRow.Header(device.DisplayName));
+                    _sidebarRows.Add(SidebarRow.Subtitle(device.Meta.SerialNumber));
                 }
 
-                foreach (var rpc in matches)
+                foreach (var (stream, columns) in streams)
                 {
-                    var row = new SettingRow(rpc, _client.ValueFor(rpc));
-                    _settingRowsById[rpc.Id] = row;
-                    _settingRows.Add(row);
+                    _sidebarRows.Add(SidebarRow.SectionHeader(
+                        stream.EffectiveSamplingRate > 0
+                            ? $"{stream.Name}   ·   {stream.EffectiveSamplingRate:0.0} Hz"
+                            : stream.Name));
+
+                    foreach (var column in columns)
+                    {
+                        var row = SidebarRow.Channel(column, _client.IsSelected(column.Key));
+                        _channelRows[column.Key] = row;
+                        _sidebarRows.Add(row);
+                    }
+                }
+
+                if (rpcs.Count > 0)
+                {
+                    _sidebarRows.Add(SidebarRow.SectionHeader("Settings"));
+                    foreach (var rpc in rpcs)
+                    {
+                        var row = SidebarRow.Setting(rpc, _client.ValueFor(rpc));
+                        _settingRows[rpc.Id] = row;
+                        _sidebarRows.Add(row);
+                    }
                 }
             }
         }
         finally
         {
-            _suppressSettingEvents = false;
+            _suppressRowEvents = false;
         }
 
-        UpdateSettingsChrome();
+        UpdateChannelValues();
+        UpdateSidebarChrome();
     }
 
-    private bool MatchesSettingsQuery(RpcInfo rpc, DeviceInfo device)
-    {
-        if (_settingsQuery.Length == 0)
-        {
-            return true;
-        }
+    private bool MatchesQuery(ColumnInfo column) =>
+        _sidebarQuery.Length == 0
+        || column.Name.Contains(_sidebarQuery, StringComparison.OrdinalIgnoreCase)
+        || column.Units.Contains(_sidebarQuery, StringComparison.OrdinalIgnoreCase);
 
-        return rpc.Name.Contains(_settingsQuery, StringComparison.OrdinalIgnoreCase)
-            || rpc.ArgType.Contains(_settingsQuery, StringComparison.OrdinalIgnoreCase)
-            || device.DisplayName.Contains(_settingsQuery, StringComparison.OrdinalIgnoreCase);
-    }
+    private bool MatchesQuery(RpcInfo rpc, DeviceInfo device) =>
+        _sidebarQuery.Length == 0
+        || rpc.Name.Contains(_sidebarQuery, StringComparison.OrdinalIgnoreCase)
+        || rpc.ArgType.Contains(_sidebarQuery, StringComparison.OrdinalIgnoreCase)
+        || device.DisplayName.Contains(_sidebarQuery, StringComparison.OrdinalIgnoreCase);
 
-    private void UpdateSettingsChrome()
-    {
-        var hasRows = _settingRows.Count > 0;
-        SettingsList.Visibility = hasRows ? Visibility.Visible : Visibility.Collapsed;
-        SettingsEmptyText.Visibility = hasRows ? Visibility.Collapsed : Visibility.Visible;
-
-        SettingsEmptyText.Text = !_client.IsConnected
-            ? "Connect a Twinleaf device to list settings."
-            : _settingsQuery.Length > 0
-                ? $"No settings match “{_settingsQuery}”."
-                : "This device reports no settings.";
-
-        ReloadRpcsButton.Visibility = _client.RpcCacheNeedsReload
-            ? Visibility.Visible
-            : Visibility.Collapsed;
-        ReloadRpcsButton.IsEnabled = _client.ReloadableRpcs.Any();
-    }
-
-    private void OnSettingsSearchChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+    private void OnSidebarSearchChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
     {
         if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput)
         {
             return;
         }
 
-        _settingsQuery = sender.Text?.Trim() ?? string.Empty;
-        RebuildSettingsList();
+        _sidebarQuery = sender.Text?.Trim() ?? string.Empty;
+        RebuildSidebar();
     }
 
-    private void OnReloadRpcsClicked(object sender, RoutedEventArgs e) => _client.ReloadAllRpcs();
-
-    /// <summary>Applies a readback to its row without disturbing an in-progress edit.</summary>
-    private void OnRpcValueUpdated(string rpcId)
+    private void UpdateSidebarChrome()
     {
-        if (!_settingRowsById.TryGetValue(rpcId, out var row) || row.Rpc is null)
+        var hasRows = _sidebarRows.Count > 0;
+        SidebarList.Visibility = hasRows ? Visibility.Visible : Visibility.Collapsed;
+        SidebarEmptyText.Visibility = hasRows ? Visibility.Collapsed : Visibility.Visible;
+
+        SidebarEmptyText.Text = _client.ConnectedDevices.Count == 0
+            ? "Connect a Twinleaf device, or open a .tio log."
+            : _sidebarQuery.Length > 0
+                ? $"Nothing matches “{_sidebarQuery}”."
+                : "This device reports no channels or settings.";
+    }
+
+    private void OnChannelChecked(object sender, RoutedEventArgs e)
+    {
+        if (_suppressRowEvents)
         {
             return;
         }
 
-        _suppressSettingEvents = true;
+        if (sender is not CheckBox { Tag: SidebarRow row } || row.Key is not { } key)
+        {
+            return;
+        }
+
+        // The row's IsSelected is already updated by the two-way binding; only
+        // tell the core when the two disagree, so echoed activeColumns events
+        // do not bounce.
+        if (_client.IsSelected(key) != row.IsSelected)
+        {
+            _client.ToggleColumn(key);
+        }
+    }
+
+    /// <summary>Re-applies the core's authoritative selection to the rows.</summary>
+    private void SyncChannelSelection()
+    {
+        _suppressRowEvents = true;
+        try
+        {
+            foreach (var (key, row) in _channelRows)
+            {
+                row.IsSelected = _client.IsSelected(key);
+            }
+        }
+        finally
+        {
+            _suppressRowEvents = false;
+        }
+
+        // "Copy plotted data" depends on there being a selection.
+        UpdateChrome();
+    }
+
+    private void UpdateChannelValues()
+    {
+        foreach (var (key, value) in _client.StreamValues)
+        {
+            if (_channelRows.TryGetValue(key, out var row))
+            {
+                row.Value = NumericDisplayPolicy.Reading(value);
+            }
+        }
+    }
+
+    private string LabelFor(ColumnKey key)
+    {
+        foreach (var device in _client.ConnectedDevices)
+        {
+            if (device.Route != key.Route)
+            {
+                continue;
+            }
+
+            foreach (var stream in device.Streams)
+            {
+                if (stream.StreamId != key.StreamId)
+                {
+                    continue;
+                }
+
+                var column = stream.Columns.FirstOrDefault(item => item.Key.ColumnIndex == key.ColumnIndex);
+                if (column is null)
+                {
+                    continue;
+                }
+
+                var label = $"{stream.Name}.{column.Name}";
+                return key.Derivation is { } derivation ? derivation.Label(label) : label;
+            }
+        }
+
+        return key.ToString();
+    }
+
+    // -----------------------------------------------------------------
+    // Settings controls
+    // -----------------------------------------------------------------
+
+    /// <summary>Applies a readback to its row without disturbing an in-progress edit.</summary>
+    private void OnRpcValueUpdated(string rpcId)
+    {
+        if (!_settingRows.TryGetValue(rpcId, out var row) || row.Rpc is null)
+        {
+            return;
+        }
+
+        _suppressRowEvents = true;
         try
         {
             row.ApplyValue(_client.ValueFor(row.Rpc));
         }
         finally
         {
-            _suppressSettingEvents = false;
+            _suppressRowEvents = false;
         }
     }
 
-    private static SettingRow? RowFrom(object sender) =>
-        (sender as FrameworkElement)?.Tag as SettingRow;
+    private static SidebarRow? RowFrom(object sender) =>
+        (sender as FrameworkElement)?.Tag as SidebarRow;
 
     private void OnCaptureRpcClicked(object sender, RoutedEventArgs e)
     {
@@ -771,7 +865,7 @@ public sealed partial class MainWindow : Window
 
     private void OnRpcSwitchToggled(object sender, RoutedEventArgs e)
     {
-        if (_suppressSettingEvents || sender is not ToggleSwitch toggle)
+        if (_suppressRowEvents || sender is not ToggleSwitch toggle)
         {
             return;
         }
@@ -860,11 +954,7 @@ public sealed partial class MainWindow : Window
             _selfTestSawData |= points > 0;
             AppLog.Error(
                 $"[selftest] frame {_selfTestFrameCount}: pane={frame.PaneId} mode={frame.Mode} " +
-                $"series={frame.Series.Count} points={points}" +
-                (points > 0
-                    ? $" x=[{frame.Series[0].Points[0].X:G6}..{frame.Series[0].Points[^1].X:G6}]" +
-                      $" y0={frame.Series[0].Points[0].Y:G6} rate={frame.Series[0].SampleRate:G6}"
-                    : string.Empty));
+                $"series={frame.Series.Count} points={points}");
         }
 
         // Pause freezes the display but leaves the core streaming, so resuming
@@ -886,23 +976,31 @@ public sealed partial class MainWindow : Window
         var connected = _client.IsConnected;
         var inspecting = _client.IsInspectionMode;
 
-        ConnectButtonText.Text = connected ? "Disconnect" : "Connect";
-        DeviceCombo.IsEnabled = !connected;
-        UrlBox.IsEnabled = !connected;
+        ConnectButton.Visibility = connected ? Visibility.Collapsed : Visibility.Visible;
+        DisconnectButton.Visibility = connected ? Visibility.Visible : Visibility.Collapsed;
+
         // A loaded log is a fixed recording: there is nothing to record and
         // nothing to pause, and the scrubber is what moves through it.
         RecordButton.IsEnabled = connected && !inspecting;
         PauseButton.IsEnabled = connected && !inspecting;
 
+        // Recording starts with the session, so the toggle has to show that
+        // rather than sitting unchecked while the log fills up. Click (not
+        // Checked) drives the handler, so this cannot re-enter it.
+        RecordButton.IsChecked = _client.IsRecording;
+
         PlaybackBar.Visibility = inspecting && _client.HasPlaybackRange
             ? Visibility.Visible
             : Visibility.Collapsed;
 
-        SaveButton.IsEnabled = !_document.IsEmpty;
-        SaveAsButton.IsEnabled = !_document.IsEmpty;
+        var hasLog = !_document.IsEmpty;
+        SaveMenuItem.IsEnabled = hasLog;
+        SaveAsMenuItem.IsEnabled = hasLog;
+        ExportMenuItem.IsEnabled = hasLog;
+        CopyDataMenuItem.IsEnabled = _client.SelectedColumns.Count > 0;
 
         var badges = new List<string> { _document.DisplayName };
-        if (_document.SavedPath is null && !_document.IsEmpty)
+        if (_document.SavedPath is null && hasLog)
         {
             badges.Add("unsaved");
         }
@@ -918,10 +1016,9 @@ public sealed partial class MainWindow : Window
         }
 
         DocumentText.Text = string.Join("  ·  ", badges);
-
         StatusText.Text = _client.ErrorMessage ?? _client.StatusMessage;
 
-        UpdateSettingsChrome();
+        UpdateSidebarChrome();
 
         RecordingText.Text = _client.LogProgress is { } progress
             ? string.Format(

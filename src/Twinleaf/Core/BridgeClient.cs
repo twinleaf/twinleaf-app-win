@@ -200,14 +200,19 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
         _runtime.SetDiscovery(active, includeAll);
 
     /// <summary>
-    /// Connects to a device. <paramref name="logPath"/> is the document's
-    /// temporary log; the core needs it up front so recording can be switched on
-    /// mid-session without reconnecting.
+    /// Connects to a device.
+    ///
+    /// Passing <paramref name="logPath"/> starts logging immediately — the core
+    /// opens the file as the session starts. That is deliberate and matches the
+    /// macOS app: an untitled document records from the first packet, so nothing
+    /// is lost before someone thinks to press Record, and Save snapshots
+    /// whatever has accumulated.
     /// </summary>
     public void Connect(string url, string? route = null, string? logPath = null)
     {
         ErrorMessage = null;
         IsInspectionMode = false;
+        IsRecording = logPath is not null;
         Playback = null;
         PlaybackStart = 0;
         PlaybackEnd = 0;

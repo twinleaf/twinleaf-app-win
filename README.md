@@ -29,9 +29,18 @@ twinleaf-app-win/
     Interop/             #   P/Invoke + binary event decoding
     Models/              #   device, stream, column, RPC model
     Core/BridgeClient.cs #   observable app model
-    Controls/            #   plot canvas, channel tree, splitter
+    Core/TioDocument.cs  #   .tio recording + save
+    Controls/            #   plot canvas, sidebar rows, splitter
   vendor/twinleaf-rust/  # submodule, pinned to the macOS app's commit
 ```
+
+### Layout
+
+The window follows the GTK app: **one sidebar, grouped per device**, carrying
+that device's streams and channels *and* its settings — settings sit inline with
+the streams they belong to rather than in a panel of their own. The header keeps
+the sidebar toggle as its one leading control, with everything else right-aligned
+and file commands (Open / Save / Save As / Export) in a menu.
 
 ### Documents
 
@@ -116,6 +125,7 @@ the milestones above are verified without a human at the keyboard:
 | `TWINLEAF_SELFTEST_CONNECT=<url>` | connect on launch and plot the first column |
 | `TWINLEAF_SELFTEST_RPC=name=value[,…]` | write settings once metadata lands, logging each reply |
 | `TWINLEAF_SELFTEST_OPEN=<path>` | open a saved `.tio` for inspection |
+| `TWINLEAF_SELFTEST_EXPORT=<path>` | export before quitting; format from the extension |
 | `TWINLEAF_SELFTEST_QUIT=<seconds>` | exit after N seconds with a summary |
 
 Diagnostics go to stderr. `TWINLEAF_DEBUG=1` additionally enables the core's own
@@ -138,10 +148,17 @@ Working end to end:
 - `.tio` documents: record to a temporary log, Save/Save As to snapshot it, and
   Open an existing log for inspection with a playback scrubber. A recording made
   by the app reads back cleanly in `tio log inspect`.
+- Export to CSV or HDF5, and copy the plotted window to the clipboard. The
+  format follows the extension you choose. Export covers the whole log, not just
+  the plotted channels — it reads the `.tio`, not the view.
 
-Not yet ported from the macOS app: CSV/HDF5 export UI, firmware-update popover,
-multi-pane layout with drag-and-drop, RPC sliders, favourites, the capture
-*viewer* (the capture trigger works), and preferences.
+**HDF5** needs the core built with its feature (`cargo build --features hdf5`,
+which wants `cmake`); the default build reports plainly that HDF5 is unavailable
+rather than failing silently.
+
+Not yet ported from the macOS app: firmware-update popover, multi-pane layout
+with drag-and-drop, RPC sliders, favourites, the capture *viewer* (the capture
+trigger works), stream-health popover, and preferences.
 
 ## License
 
