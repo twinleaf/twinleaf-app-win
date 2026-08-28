@@ -30,6 +30,7 @@ twinleaf-app-win/
     Models/              #   device, stream, column, RPC model
     Core/BridgeClient.cs #   observable app model
     Core/TioDocument.cs  #   .tio recording + save
+    Models/Diagnostics.cs#   firmware + stream-health events
     Controls/            #   plot canvas, sidebar rows, splitter
   vendor/twinleaf-rust/  # submodule, pinned to the macOS app's commit
 ```
@@ -61,7 +62,7 @@ Events arrive in three shapes, discriminated by the callback's `kind`:
 
 | kind | transport | used for |
 | --- | --- | --- |
-| 0 | UTF-8 JSON | events with no binary encoding (firmware progress, stream health) |
+| 0 | UTF-8 JSON | events with no binary encoding: `upgradeStatus`, `upgradeProgress`, `health` |
 | 1 | binary plot frame | the streaming hot path — already-decimated series |
 | 2 | binary typed event | the sixteen common events (device list, metadata, RPC results, …) |
 
@@ -152,6 +153,15 @@ Working end to end:
   format follows the extension you choose. Export covers the whole log, not just
   the plotted channels — it reads the `.tio`, not the view.
 
+- Stream-health popover: per-stream rate, jitter, clock error and dropped
+  counts, refreshed about twice a second. The toolbar button appears only once
+  the core reports stream data and flags itself when a stream goes stale or
+  starts losing samples.
+- Firmware popover: available updates with a per-device Flash button and live
+  flash progress. The update arrow stays hidden unless something is actually
+  available — its appearance *is* the notification — so the check also lives in
+  the menu where it is always reachable.
+
 **HDF5** needs the core built with its feature (`cargo build --features hdf5`,
 which wants `cmake`); the default build reports plainly that HDF5 is unavailable
 rather than failing silently.
@@ -159,6 +169,16 @@ rather than failing silently.
 Not yet ported from the macOS app: firmware-update popover, multi-pane layout
 with drag-and-drop, RPC sliders, favourites, the capture *viewer* (the capture
 trigger works), stream-health popover, and preferences.
+
+## Network access
+
+After a session starts streaming, **the core** checks whether newer published
+firmware exists for each connected device, against the public catalog at
+`github.com/twinleaf/twinleaf-firmware-updates` via `api.github.com`. The app
+does not repeat that check on its own — doing so just spends a second round trip
+on the same answer — it only re-checks when asked. Firmware images download over
+HTTPS when an upgrade starts. Apart from this, the app makes no connections
+other than the device and proxy URLs you configure.
 
 ## License
 

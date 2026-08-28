@@ -176,6 +176,54 @@
                 </AppBarButton.Flyout>
             </AppBarButton>
 
+            <!--
+                Connection health: hidden until the core reports stream data,
+                as GTK's trailing health button.
+            -->
+            <AppBarButton x:Name="HealthButton" Label="Health" Visibility="Collapsed">
+                <AppBarButton.Icon>
+                    <FontIcon x:Name="HealthIcon" Glyph="&#xE9D9;" />
+                </AppBarButton.Icon>
+                <AppBarButton.Flyout>
+                    <Flyout>
+                        <StackPanel Width="340" Spacing="8">
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="Connection health" />
+
+                            <TextBlock
+                                x:Name="HealthEmptyText"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Style="{StaticResource CaptionTextBlockStyle}"
+                                Text="No stream data yet." />
+
+                            <ItemsControl x:Name="HealthList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="models:StreamHealth">
+                                        <StackPanel Margin="0,0,0,8">
+                                            <StackPanel Orientation="Horizontal" Spacing="6">
+                                                <TextBlock
+                                                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                                                    Text="{x:Bind Title}" />
+                                                <TextBlock
+                                                    Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                                    Style="{StaticResource CaptionTextBlockStyle}"
+                                                    Text="⚠ stale"
+                                                    VerticalAlignment="Center"
+                                                    Visibility="{x:Bind StaleVisibility}" />
+                                            </StackPanel>
+                                            <TextBlock
+                                                FontFamily="Consolas"
+                                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                Style="{StaticResource CaptionTextBlockStyle}"
+                                                Text="{x:Bind Detail}" />
+                                        </StackPanel>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+                        </StackPanel>
+                    </Flyout>
+                </AppBarButton.Flyout>
+            </AppBarButton>
+
             <AppBarButton x:Name="MenuButton" Label="Menu">
                 <AppBarButton.Icon>
                     <FontIcon Glyph="&#xE700;" />
@@ -208,7 +256,93 @@
                                 <FontIcon Glyph="&#xE8C8;" />
                             </MenuFlyoutItem.Icon>
                         </MenuFlyoutItem>
+                        <MenuFlyoutSeparator />
+                        <!--
+                            The update arrow only appears when something is
+                            available, so the check needs a home that is always
+                            reachable.
+                        -->
+                        <MenuFlyoutItem
+                            x:Name="CheckFirmwareMenuItem"
+                            Click="OnCheckUpgradeClicked"
+                            Text="Check for firmware updates">
+                            <MenuFlyoutItem.Icon>
+                                <FontIcon Glyph="&#xE74A;" />
+                            </MenuFlyoutItem.Icon>
+                        </MenuFlyoutItem>
                     </MenuFlyout>
+                </AppBarButton.Flyout>
+            </AppBarButton>
+
+            <!--
+                Firmware: hidden unless an update is actually available, so the
+                arrow appearing is itself the notification. Matches GTK.
+            -->
+            <AppBarButton x:Name="FirmwareButton" Label="Update" Visibility="Collapsed">
+                <AppBarButton.Icon>
+                    <FontIcon Foreground="{ThemeResource SystemFillColorSuccessBrush}" Glyph="&#xE74A;" />
+                </AppBarButton.Icon>
+                <AppBarButton.Flyout>
+                    <Flyout x:Name="FirmwareFlyout" Opened="OnFirmwareFlyoutOpened">
+                        <StackPanel Width="340" Spacing="8">
+                            <TextBlock Style="{StaticResource BodyStrongTextBlockStyle}" Text="Firmware" />
+
+                            <TextBlock
+                                x:Name="FirmwareStatusText"
+                                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                Style="{StaticResource CaptionTextBlockStyle}"
+                                Text="Open to check for updates."
+                                TextWrapping="Wrap" />
+
+                            <ItemsControl x:Name="FirmwareList">
+                                <ItemsControl.ItemTemplate>
+                                    <DataTemplate x:DataType="models:FirmwareUpdate">
+                                        <Grid Margin="0,0,0,8" ColumnSpacing="8">
+                                            <Grid.ColumnDefinitions>
+                                                <ColumnDefinition Width="*" />
+                                                <ColumnDefinition Width="Auto" />
+                                            </Grid.ColumnDefinitions>
+                                            <StackPanel Grid.Column="0">
+                                                <TextBlock Text="{x:Bind DeviceName}" />
+                                                <TextBlock
+                                                    FontFamily="Consolas"
+                                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                                    Style="{StaticResource CaptionTextBlockStyle}"
+                                                    Text="{x:Bind VersionSummary}" />
+                                            </StackPanel>
+                                            <Button
+                                                Grid.Column="1"
+                                                VerticalAlignment="Center"
+                                                AutomationProperties.Name="{x:Bind DeviceName}"
+                                                Click="OnFlashClicked"
+                                                Content="Flash"
+                                                Tag="{x:Bind}" />
+                                        </Grid>
+                                    </DataTemplate>
+                                </ItemsControl.ItemTemplate>
+                            </ItemsControl>
+
+                            <StackPanel x:Name="FirmwareProgressPanel" Spacing="4" Visibility="Collapsed">
+                                <TextBlock
+                                    x:Name="FirmwareProgressText"
+                                    Style="{StaticResource CaptionTextBlockStyle}"
+                                    TextWrapping="Wrap" />
+                                <ProgressBar x:Name="FirmwareProgressBar" />
+                                <TextBlock
+                                    x:Name="FirmwareWarningText"
+                                    Foreground="{ThemeResource SystemFillColorCautionBrush}"
+                                    Style="{StaticResource CaptionTextBlockStyle}"
+                                    Text="Keep the device powered until this finishes."
+                                    TextWrapping="Wrap" />
+                            </StackPanel>
+
+                            <Button
+                                x:Name="CheckUpgradeButton"
+                                HorizontalAlignment="Stretch"
+                                Click="OnCheckUpgradeClicked"
+                                Content="Check for updates" />
+                        </StackPanel>
+                    </Flyout>
                 </AppBarButton.Flyout>
             </AppBarButton>
         </CommandBar>

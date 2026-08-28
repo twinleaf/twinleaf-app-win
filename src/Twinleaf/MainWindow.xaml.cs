@@ -73,12 +73,23 @@ public sealed partial class MainWindow : Window
         _client.PlaybackChanged += OnPlaybackChanged;
         _client.ExportResultReceived += OnExportResult;
         _client.ViewDataReceived += OnViewData;
+        _client.UpgradesChanged += OnUpgradesChanged;
+        _client.StreamHealthChanged += OnStreamHealthChanged;
+        _client.PropertyChanged += (_, args) =>
+        {
+            if (args.PropertyName == nameof(BridgeClient.UpgradeProgress))
+            {
+                DispatcherQueue.TryEnqueue(OnUpgradeProgressChanged);
+            }
+        };
 
         SidebarList.ItemsSource = _sidebarRows;
         Plot.LabelProvider = LabelFor;
 
         BuildWindowMenu();
         UpdateChrome();
+        OnUpgradesChanged();
+        OnStreamHealthChanged();
 
         // Live discovery keeps the picker current without a polling timer.
         _client.SetDiscovery(active: true);
@@ -555,6 +566,128 @@ public sealed partial class MainWindow : Window
         StatusText.Text = data.Rows is { } rows
             ? $"Copied {rows:N0} rows to the clipboard"
             : "Copied plotted data to the clipboard";
+    }
+
+    // -----------------------------------------------------------------
+    // Firmware
+    // -----------------------------------------------------------------
+
+    /// <summary>Re-check whenever the popover opens, as the GTK button does.</summary>
+    private void OnFirmwareFlyoutOpened(object? sender, object e) => _client.CheckUpgrade();
+
+    private void OnCheckUpgradeClicked(object sender, RoutedEventArgs e)
+    {
+        if (!_client.IsConnected)
+        {
+            StatusText.Text = "Connect a device before checking for firmware updates.";
+            return;
+        }
+
+        FirmwareStatusText.Text = "Checking…";
+        // Invoked from the menu the arrow is hidden, so the outcome has to land
+        // somewhere the user is looking.
+        _reportUpgradeCheckToStatusBar = true;
+        StatusText.Text = "Checking for firmware updates…";
+        _client.CheckUpgrade();
+    }
+
+    private bool _reportUpgradeCheckToStatusBar;
+
+    private void OnFlashClicked(object sender, RoutedEventArgs e)
+    {
+        if ((sender as FrameworkElement)?.Tag is not FirmwareUpdate update)
+        {
+            return;
+        }
+
+        _client.PerformUpgrade(update.Route);
+        FirmwareProgressPanel.Visibility = Visibility.Visible;
+        FirmwareProgressBar.IsIndeterminate = true;
+        FirmwareProgressText.Text = $"Starting upgrade for {update.DeviceName}…";
+        StatusText.Text = $"Flashing {update.DeviceName} — keep it powered.";
+    }
+
+    private void OnUpgradesChanged()
+    {
+        FirmwareList.ItemsSource = _client.AvailableUpgrades.ToList();
+
+        var count = _client.AvailableUpgrades.Count;
+        // The button appearing is itself the notification, so it stays hidden
+        // until there is something to install. It also stays visible while a
+        // flash is running, so progress does not vanish mid-upgrade.
+        FirmwareButton.Visibility = count > 0 || _client.UpgradeProgress is { IsRunning: true }
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+        FirmwareStatusText.Text = count > 0
+            ? count == 1 ? "1 device has a firmware update." : $"{count} devices have firmware updates."
+            : _client.HasCheckedUpgrades
+                ? "Firmware is up to date."
+                : "Open to check for updates.";
+
+        FirmwareStatusText.Visibility = Visibility.Visible;
+
+        if (_reportUpgradeCheckToStatusBar)
+        {
+            _reportUpgradeCheckToStatusBar = false;
+            StatusText.Text = count > 0
+                ? $"{FirmwareStatusText.Text} Use the update button in the toolbar."
+                : "Firmware is up to date.";
+        }
+    }
+
+    private void OnUpgradeProgressChanged()
+    {
+        if (_client.UpgradeProgress is not { } progress)
+        {
+            FirmwareProgressPanel.Visibility = Visibility.Collapsed;
+            return;
+        }
+
+        FirmwareButton.Visibility = Visibility.Visible;
+        FirmwareProgressPanel.Visibility = Visibility.Visible;
+        FirmwareProgressText.Text = progress.Message;
+
+        FirmwareProgressBar.IsIndeterminate = progress.IsIndeterminate;
+        if (progress.Fraction is { } fraction)
+        {
+            FirmwareProgressBar.Value = fraction * 100;
+        }
+
+        // The "keep it powered" warning is only true while the flash is live.
+        FirmwareWarningText.Visibility = progress.IsRunning ? Visibility.Visible : Visibility.Collapsed;
+
+        if (progress.IsComplete)
+        {
+            StatusText.Text = "Firmware upgrade complete.";
+        }
+        else if (progress.IsError)
+        {
+            StatusText.Text = $"Firmware upgrade failed: {progress.Message}";
+        }
+    }
+
+    // -----------------------------------------------------------------
+    // Stream health
+    // -----------------------------------------------------------------
+
+    private void OnStreamHealthChanged()
+    {
+        var streams = _client.StreamHealth.ToList();
+
+        // Only surface the button once the core actually reports stream data.
+        HealthButton.Visibility = streams.Count > 0 ? Visibility.Visible : Visibility.Collapsed;
+        HealthList.ItemsSource = streams;
+        HealthEmptyText.Visibility = streams.Count > 0 ? Visibility.Collapsed : Visibility.Visible;
+
+        // Tint the icon when a stream has stalled or is losing samples, so the
+        // problem is visible without opening the popover.
+        var attention = streams.Any(stream => stream.NeedsAttention);
+        HealthIcon.Foreground = attention
+            ? (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["SystemFillColorCautionBrush"]
+            : (Microsoft.UI.Xaml.Media.Brush)Application.Current.Resources["TextFillColorPrimaryBrush"];
+
+        HealthButton.Label = attention ? "Health ⚠" : "Health";
     }
 
     // -----------------------------------------------------------------

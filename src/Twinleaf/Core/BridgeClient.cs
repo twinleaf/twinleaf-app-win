@@ -6,6 +6,7 @@ using System.Collections.ObjectModel;
 using System.ComponentModel;
 using System.Linq;
 using System.Runtime.CompilerServices;
+using System.Text.Json;
 using System.Threading;
 using Microsoft.UI.Dispatching;
 using Twinleaf.Interop;
@@ -236,6 +237,15 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
         RpcCacheNeedsReload = false;
         IsInspectionMode = false;
         IsRecording = false;
+
+        // Diagnostics describe the session that just ended.
+        StreamHealth.Clear();
+        AvailableUpgrades.Clear();
+        UpgradeProgress = null;
+        HasCheckedUpgrades = false;
+        StreamHealthChanged?.Invoke();
+        UpgradesChanged?.Invoke();
+
         Playback = null;
         PlaybackStart = 0;
         PlaybackEnd = 0;
@@ -530,6 +540,12 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
                 PruneSelection();
                 EnableDefaultStreamSelection();
                 LoadReadableRpcs();
+
+                // No firmware check here: the core already runs one on its own
+                // when the session starts streaming, so the update arrow appears
+                // without being asked. Checking again on metadata just spends a
+                // second GitHub round trip on the same answer. CheckUpgrade()
+                // stays for explicit re-checks from the UI.
                 break;
 
             case CoreEvent.StreamValues values:
@@ -603,6 +619,7 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
                 break;
 
             case CoreEvent.Json json:
+                ApplyJsonEvent(json);
                 JsonEventReceived?.Invoke(json);
                 break;
         }
@@ -610,6 +627,98 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
 
     /// <summary>Firmware upgrade + stream-health events arrive over the JSON transport.</summary>
     public event Action<CoreEvent.Json>? JsonEventReceived;
+
+    // -----------------------------------------------------------------
+    // Diagnostics (firmware + stream health)
+    //
+    // These are the two event families the core has no binary encoding for, so
+    // they arrive as JSON and are decoded by field name here.
+    // -----------------------------------------------------------------
+
+    /// <summary>Devices with newer published firmware. Empty until a check runs.</summary>
+    public ObservableCollection<FirmwareUpdate> AvailableUpgrades { get; } = [];
+
+    /// <summary>Per-stream timing diagnostics; refreshed about twice a second.</summary>
+    public ObservableCollection<StreamHealth> StreamHealth { get; } = [];
+
+    private FirmwareProgress? _upgradeProgress;
+
+    /// <summary>Progress of an in-flight flash, or null when none is running.</summary>
+    public FirmwareProgress? UpgradeProgress
+    {
+        get => _upgradeProgress;
+        private set => Set(ref _upgradeProgress, value);
+    }
+
+    /// <summary>True once a check has reported, so the UI can distinguish "up to date" from "not checked".</summary>
+    public bool HasCheckedUpgrades { get; private set; }
+
+
+    public event Action? UpgradesChanged;
+    public event Action? StreamHealthChanged;
+
+    private void ApplyJsonEvent(CoreEvent.Json json)
+    {
+        switch (json.Type)
+        {
+            case "upgradeStatus":
+                HasCheckedUpgrades = true;
+                ReplaceAll(AvailableUpgrades, ReadUpgrades(json.Payload));
+                AppLog.Debug($"upgradeStatus: {AvailableUpgrades.Count} update(s) available");
+                UpgradesChanged?.Invoke();
+                break;
+
+            case "upgradeProgress":
+                var progress = FirmwareProgress.FromJson(json.Payload);
+                UpgradeProgress = progress;
+
+                if (progress.IsComplete)
+                {
+                    // The device reboots into the new firmware, so the offer for
+                    // this route is spent.
+                    for (var index = AvailableUpgrades.Count - 1; index >= 0; index--)
+                    {
+                        if (AvailableUpgrades[index].Route == progress.Route)
+                        {
+                            AvailableUpgrades.RemoveAt(index);
+                        }
+                    }
+
+                    UpgradesChanged?.Invoke();
+                }
+                else if (progress.IsError)
+                {
+                    ErrorMessage = $"Firmware upgrade failed: {progress.Message}";
+                }
+
+                break;
+
+            case "health":
+                ReplaceAll(StreamHealth, Models.StreamHealth.ListFromJson(json.Payload));
+                StreamHealthChanged?.Invoke();
+                break;
+
+            default:
+                AppLog.Debug($"unhandled JSON event: {json.Type}");
+                break;
+        }
+    }
+
+    private static IReadOnlyList<FirmwareUpdate> ReadUpgrades(JsonElement payload)
+    {
+        if (!payload.TryGetProperty("available", out var available) || available.ValueKind != JsonValueKind.Array)
+        {
+            return [];
+        }
+
+        var result = new List<FirmwareUpdate>();
+        foreach (var entry in available.EnumerateArray())
+        {
+            result.Add(FirmwareUpdate.FromJson(entry));
+        }
+
+        return result;
+    }
 
     public event Action<CoreEvent.RpcResult>? RpcResultReceived;
     public event Action<CoreEvent.RpcInvalidated>? RpcInvalidatedReceived;
