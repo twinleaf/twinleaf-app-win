@@ -161,6 +161,8 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
         ConnectedDevices.Clear();
         _selectedColumns.Clear();
         _streamValues.Clear();
+        _rpcValues.Clear();
+        RpcCacheNeedsReload = false;
         SelectionChanged?.Invoke();
         OnPropertyChanged(nameof(IsConnected));
     }
@@ -194,11 +196,122 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
         return requestId;
     }
 
-    public string CallRpc(string route, string name, JsonValue? argument)
+    // -----------------------------------------------------------------
+    // RPCs
+    // -----------------------------------------------------------------
+
+    /// <summary>
+    /// Latest value per RPC, keyed by <see cref="RpcInfo.Id"/>. Held beside the
+    /// metadata rather than folded into it: <see cref="ConnectedDevices"/> holds
+    /// immutable records, and a value arriving for one setting should not
+    /// rebuild every device's stream and RPC lists.
+    /// </summary>
+    private readonly Dictionary<string, JsonValue?> _rpcValues = [];
+
+    /// <summary>Raised with the RPC id whose value changed.</summary>
+    public event Action<string>? RpcValueUpdated;
+
+    /// <summary>The value to display: a live readback if we have one, else what metadata carried.</summary>
+    public JsonValue? ValueFor(RpcInfo rpc) =>
+        _rpcValues.TryGetValue(rpc.Id, out var value) ? value : rpc.Value;
+
+    private bool _rpcCacheNeedsReload;
+
+    /// <summary>
+    /// Set when the device tells us a change invalidated cached values — usually
+    /// because writing one setting changed others. The sidebar surfaces a
+    /// refresh affordance rather than re-reading everything unprompted, which
+    /// could be a lot of RPC traffic on a large device.
+    /// </summary>
+    public bool RpcCacheNeedsReload
+    {
+        get => _rpcCacheNeedsReload;
+        private set => Set(ref _rpcCacheNeedsReload, value);
+    }
+
+    /// <summary>Reads an RPC (a call with no argument).</summary>
+    public string ReadRpc(RpcInfo rpc)
     {
         var requestId = NextRequestId();
-        _runtime.CallRpc(requestId, route, name, argument);
+        _runtime.CallRpc(requestId, rpc.Route, rpc.Name, RpcArgument.None);
         return requestId;
+    }
+
+    /// <summary>
+    /// Writes an RPC from user-entered text, coerced to the type the RPC
+    /// declares. Text that does not parse is not sent — writing a default to a
+    /// device setting because the user mistyped would be worse than doing
+    /// nothing. Returns null in that case.
+    /// </summary>
+    public string? WriteRpc(RpcInfo rpc, string? argumentText)
+    {
+        var argument = RpcArgument.Parse(rpc, argumentText);
+        if (!argument.HasValue && !rpc.IsActionRpc)
+        {
+            return null;
+        }
+
+        var requestId = NextRequestId();
+        _runtime.CallRpc(requestId, rpc.Route, rpc.Name, argument);
+
+        // Show the new value immediately; the device's reply overwrites it.
+        // Without this a switch springs back until the round trip completes.
+        if (argument.ToJsonValue() is { } optimistic)
+        {
+            _rpcValues[rpc.Id] = optimistic;
+            RpcValueUpdated?.Invoke(rpc.Id);
+        }
+
+        return requestId;
+    }
+
+    /// <summary>Fires an action RPC, which takes no argument.</summary>
+    public string RunRpc(RpcInfo rpc)
+    {
+        var requestId = NextRequestId();
+        _runtime.CallRpc(requestId, rpc.Route, rpc.Name, RpcArgument.None);
+        return requestId;
+    }
+
+    /// <summary>
+    /// Settings that are safe to read in bulk.
+    ///
+    /// Action RPCs are excluded even when the device reports them as readable:
+    /// a unit-typed RPC has no value, so "reading" it <em>runs</em> it. Without
+    /// this, connecting would fire every <c>dev.conf.save</c> /
+    /// <c>dev.conf.reset</c> on the device. Capture RPCs are excluded for the
+    /// same reason — reading one triggers a capture.
+    /// </summary>
+    public IEnumerable<RpcInfo> ReloadableRpcs =>
+        ConnectedDevices
+            .SelectMany(device => device.Rpcs)
+            .Where(rpc => rpc.Readable && rpc.HasMetadata && !rpc.IsCaptureRpc && !rpc.IsActionRpc);
+
+    /// <summary>Re-reads every readable setting and clears the stale-cache flag.</summary>
+    public void ReloadAllRpcs()
+    {
+        RpcCacheNeedsReload = false;
+        LoadReadableRpcs();
+    }
+
+    /// <summary>
+    /// Reads every safe-to-read setting. Called once metadata lands, because
+    /// the metadata event carries values only for settings the device happened
+    /// to have cached — most arrive null and have to be asked for.
+    /// </summary>
+    private void LoadReadableRpcs()
+    {
+        var readable = ReloadableRpcs.ToList();
+        if (readable.Count == 0)
+        {
+            return;
+        }
+
+        AppLog.Debug($"loading {readable.Count} readable RPC value(s)");
+        foreach (var rpc in readable)
+        {
+            ReadRpc(rpc);
+        }
     }
 
     public void CheckUpgrade() => _runtime.CheckUpgrade();
@@ -296,8 +409,14 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
                 break;
 
             case CoreEvent.Metadata metadata:
+                // Fresh metadata carries current values, so readbacks collected
+                // against the previous session are stale — a device that reset
+                // may not even have the same settings.
+                _rpcValues.Clear();
+                RpcCacheNeedsReload = false;
                 ReplaceAll(ConnectedDevices, metadata.Devices);
                 PruneSelection();
+                LoadReadableRpcs();
                 break;
 
             case CoreEvent.StreamValues values:
@@ -344,10 +463,15 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
                 break;
 
             case CoreEvent.RpcResult result:
+                ApplyRpcResult(result);
                 RpcResultReceived?.Invoke(result);
                 break;
 
             case CoreEvent.RpcInvalidated invalidated:
+                // Writing one setting can change others (a rate change moving a
+                // filter cutoff, say). The device only tells us the cache is
+                // stale, not what the new values are.
+                RpcCacheNeedsReload = true;
                 RpcInvalidatedReceived?.Invoke(invalidated);
                 break;
 
@@ -376,6 +500,32 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
     public event Action<CoreEvent.RpcInvalidated>? RpcInvalidatedReceived;
     public event Action<CoreEvent.ExportResult>? ExportResultReceived;
     public event Action<CoreEvent.ViewData>? ViewDataReceived;
+
+    /// <summary>
+    /// Caches a successful readback. The reply carries the route and name
+    /// rather than the request id we sent, so results from a reload land on the
+    /// right rows without tracking every in-flight request.
+    /// </summary>
+    private void ApplyRpcResult(CoreEvent.RpcResult result)
+    {
+        if (!result.Ok)
+        {
+            if (result.ErrorMessage is { Length: > 0 } message)
+            {
+                AppLog.Debug($"rpc {result.Route}#{result.Name} failed: {message}");
+            }
+
+            return;
+        }
+
+        if (result.Route is not { } route || result.Name is not { } name)
+        {
+            return;
+        }
+
+        _rpcValues[$"{route}#{name}"] = result.Value;
+        RpcValueUpdated?.Invoke($"{route}#{name}");
+    }
 
     private void ApplyStatus(CoreEvent.Status status)
     {

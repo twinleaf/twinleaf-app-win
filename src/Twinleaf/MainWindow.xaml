@@ -111,6 +111,8 @@
                 <ColumnDefinition x:Name="SidebarColumn" Width="300" MinWidth="220" />
                 <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" MinWidth="320" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition x:Name="SettingsColumn" Width="340" MinWidth="260" />
             </Grid.ColumnDefinitions>
 
             <!-- Channel sidebar: device > stream > column, ticked to plot -->
@@ -181,6 +183,164 @@
 
             <!-- Plot -->
             <controls:PlotView x:Name="Plot" Grid.Column="2" Margin="0,0,8,8" />
+
+            <controls:SplitterThumb
+                x:Name="SettingsSplitter"
+                Grid.Column="3"
+                Invert="True"
+                TargetColumn="{x:Bind SettingsColumn}" />
+
+            <!-- Settings sidebar: device RPCs, one row per setting -->
+            <Grid Grid.Column="4">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <Grid Grid.Row="0" Margin="12,8,8,4">
+                    <Grid.ColumnDefinitions>
+                        <ColumnDefinition Width="*" />
+                        <ColumnDefinition Width="Auto" />
+                    </Grid.ColumnDefinitions>
+
+                    <TextBlock
+                        Grid.Column="0"
+                        VerticalAlignment="Center"
+                        Style="{StaticResource BodyStrongTextBlockStyle}"
+                        Text="Settings" />
+
+                    <!--
+                        Only offered once the device says its cached values went
+                        stale; re-reading every setting unprompted is a lot of
+                        RPC traffic on a large device.
+                    -->
+                    <Button
+                        x:Name="ReloadRpcsButton"
+                        Grid.Column="1"
+                        Padding="6,2"
+                        Click="OnReloadRpcsClicked"
+                        ToolTipService.ToolTip="Reload all readable setting values"
+                        Visibility="Collapsed">
+                        <FontIcon FontSize="14" Glyph="&#xE72C;" />
+                    </Button>
+                </Grid>
+
+                <AutoSuggestBox
+                    x:Name="SettingsSearch"
+                    Grid.Row="1"
+                    Margin="12,0,8,8"
+                    PlaceholderText="Search settings"
+                    QueryIcon="Find"
+                    TextChanged="OnSettingsSearchChanged" />
+
+                <TextBlock
+                    x:Name="SettingsEmptyText"
+                    Grid.Row="2"
+                    Margin="12,16,12,0"
+                    VerticalAlignment="Top"
+                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                    Style="{StaticResource CaptionTextBlockStyle}"
+                    Text="Connect a Twinleaf device to list settings."
+                    TextWrapping="Wrap" />
+
+                <ListView
+                    x:Name="SettingsList"
+                    Grid.Row="2"
+                    Margin="0,0,0,8"
+                    SelectionMode="None">
+                    <ListView.ItemContainerStyle>
+                        <Style TargetType="ListViewItem">
+                            <Setter Property="HorizontalContentAlignment" Value="Stretch" />
+                            <Setter Property="Padding" Value="8,2" />
+                            <Setter Property="MinHeight" Value="0" />
+                        </Style>
+                    </ListView.ItemContainerStyle>
+
+                    <ListView.ItemTemplate>
+                        <DataTemplate x:DataType="controls:SettingRow">
+                            <Grid>
+                                <!-- Device grouping header -->
+                                <TextBlock
+                                    Margin="4,10,0,2"
+                                    Style="{StaticResource CaptionTextBlockStyle}"
+                                    FontWeight="SemiBold"
+                                    Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                    Text="{x:Bind Title, Mode=OneWay}"
+                                    Visibility="{x:Bind HeaderVisibility}" />
+
+                                <!-- Setting row: name on the left, control on the right -->
+                                <Grid ColumnSpacing="8" Visibility="{x:Bind SettingVisibility}">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="128" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <TextBlock
+                                        Grid.Column="0"
+                                        VerticalAlignment="Center"
+                                        Text="{x:Bind Title, Mode=OneWay}"
+                                        TextTrimming="CharacterEllipsis"
+                                        ToolTipService.ToolTip="{x:Bind Detail, Mode=OneWay}" />
+
+                                    <Grid Grid.Column="1">
+                                        <Button
+                                            AutomationProperties.Name="{x:Bind Title, Mode=OneWay}"
+                                            HorizontalAlignment="Stretch"
+                                            Click="OnCaptureRpcClicked"
+                                            Content="Capture"
+                                            Tag="{x:Bind}"
+                                            Visibility="{x:Bind CaptureVisibility}" />
+
+                                        <Button
+                                            AutomationProperties.Name="{x:Bind Title, Mode=OneWay}"
+                                            HorizontalAlignment="Stretch"
+                                            Click="OnRunRpcClicked"
+                                            Content="{x:Bind ActionTitle}"
+                                            IsEnabled="{x:Bind IsWritable}"
+                                            Tag="{x:Bind}"
+                                            Visibility="{x:Bind ActionVisibility}" />
+
+                                        <ToggleSwitch
+                                            AutomationProperties.Name="{x:Bind Title, Mode=OneWay}"
+                                            HorizontalAlignment="Right"
+                                            IsEnabled="{x:Bind IsWritable}"
+                                            IsOn="{x:Bind SwitchValue, Mode=TwoWay}"
+                                            MinWidth="0"
+                                            OffContent=""
+                                            OnContent=""
+                                            Tag="{x:Bind}"
+                                            Toggled="OnRpcSwitchToggled"
+                                            Visibility="{x:Bind SwitchVisibility}" />
+
+                                        <TextBox
+                                            AutomationProperties.Name="{x:Bind Title, Mode=OneWay}"
+                                            HorizontalAlignment="Stretch"
+                                            GotFocus="OnRpcFieldFocus"
+                                            KeyDown="OnRpcFieldKeyDown"
+                                            LostFocus="OnRpcFieldCommit"
+                                            PlaceholderText="{x:Bind Placeholder}"
+                                            Tag="{x:Bind}"
+                                            Text="{x:Bind ValueText, Mode=TwoWay, UpdateSourceTrigger=PropertyChanged}"
+                                            TextAlignment="Right"
+                                            Visibility="{x:Bind FieldVisibility}" />
+
+                                        <TextBlock
+                                            HorizontalAlignment="Right"
+                                            VerticalAlignment="Center"
+                                            FontFamily="Consolas"
+                                            Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                            Style="{StaticResource CaptionTextBlockStyle}"
+                                            Text="{x:Bind ReadOnlyText, Mode=OneWay}"
+                                            TextTrimming="CharacterEllipsis"
+                                            Visibility="{x:Bind ReadOnlyVisibility}" />
+                                    </Grid>
+                                </Grid>
+                            </Grid>
+                        </DataTemplate>
+                    </ListView.ItemTemplate>
+                </ListView>
+            </Grid>
         </Grid>
 
         <!-- Status bar -->

@@ -8,6 +8,7 @@ using System.Globalization;
 using System.Linq;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Input;
 using Twinleaf.Controls;
 using Twinleaf.Core;
 using Twinleaf.Models;
@@ -40,12 +41,18 @@ public sealed partial class MainWindow : Window
         _client = new BridgeClient(DispatcherQueue);
         _client.PropertyChanged += (_, _) => DispatcherQueue.TryEnqueue(UpdateChrome);
         _client.AvailableDevices.CollectionChanged += OnAvailableDevicesChanged;
-        _client.ConnectedDevices.CollectionChanged += (_, _) => RebuildChannelTree();
+        _client.ConnectedDevices.CollectionChanged += (_, _) =>
+        {
+            RebuildChannelTree();
+            RebuildSettingsList();
+        };
         _client.StreamValuesUpdated += UpdateChannelValues;
         _client.SelectionChanged += SyncChannelSelection;
         _client.PlotFrameReceived += OnPlotFrame;
+        _client.RpcValueUpdated += OnRpcValueUpdated;
 
         ChannelTree.ItemsSource = _channelRoots;
+        SettingsList.ItemsSource = _settingRows;
         Plot.LabelProvider = LabelFor;
 
         BuildWindowMenu();
@@ -85,6 +92,20 @@ public sealed partial class MainWindow : Window
             _client.ConnectedDevices.CollectionChanged += SelfTestSelectFirstColumn;
         }
 
+        // TWINLEAF_SELFTEST_RPC="name=value[,name=value]" writes settings once
+        // metadata lands and logs the device's replies, so an RPC round trip can
+        // be verified without a human at the keyboard.
+        var rpcScript = Environment.GetEnvironmentVariable("TWINLEAF_SELFTEST_RPC");
+        if (!string.IsNullOrWhiteSpace(rpcScript))
+        {
+            _client.RpcResultReceived += result =>
+                AppLog.Error(
+                    $"[selftest] rpc reply {result.Route}#{result.Name} ok={result.Ok} " +
+                    $"value={result.Value?.ToString() ?? "null"} error={result.ErrorMessage ?? "-"}");
+
+            _client.ConnectedDevices.CollectionChanged += (_, _) => SelfTestRunRpcScript(rpcScript);
+        }
+
         var quitAfter = Environment.GetEnvironmentVariable("TWINLEAF_SELFTEST_QUIT");
         if (double.TryParse(quitAfter, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) && seconds > 0)
         {
@@ -106,6 +127,50 @@ public sealed partial class MainWindow : Window
                 Application.Current.Exit();
             };
             timer.Start();
+        }
+    }
+
+    private bool _selfTestRpcScriptRan;
+
+    /// <summary>
+    /// Applies the <c>TWINLEAF_SELFTEST_RPC</c> script through the same
+    /// <see cref="BridgeClient.WriteRpc"/> the settings field uses, so the text
+    /// coercion and the typed FFI marshalling are the code under test.
+    /// </summary>
+    private void SelfTestRunRpcScript(string script)
+    {
+        if (_selfTestRpcScriptRan || _client.ConnectedDevices.Count == 0)
+        {
+            return;
+        }
+
+        _selfTestRpcScriptRan = true;
+
+        foreach (var assignment in script.Split(',', StringSplitOptions.RemoveEmptyEntries))
+        {
+            var parts = assignment.Split('=', 2);
+            if (parts.Length != 2)
+            {
+                continue;
+            }
+
+            var name = parts[0].Trim();
+            var text = parts[1].Trim();
+
+            var rpc = _client.ConnectedDevices
+                .SelectMany(device => device.Rpcs)
+                .FirstOrDefault(candidate => candidate.Name == name);
+
+            if (rpc is null)
+            {
+                AppLog.Error($"[selftest] rpc '{name}' not found on device");
+                continue;
+            }
+
+            var request = _client.WriteRpc(rpc, text);
+            AppLog.Error(
+                $"[selftest] write {name}={text} (type {rpc.ArgType}) -> " +
+                (request is null ? "REJECTED by coercion" : $"sent as {request}"));
         }
     }
 
@@ -381,6 +446,225 @@ public sealed partial class MainWindow : Window
     }
 
     // -----------------------------------------------------------------
+    // Settings sidebar (device RPCs)
+    // -----------------------------------------------------------------
+
+    private readonly ObservableCollection<SettingRow> _settingRows = [];
+
+    /// <summary>Setting rows by RPC id, so a readback updates in O(1).</summary>
+    private readonly Dictionary<string, SettingRow> _settingRowsById = [];
+
+    /// <summary>Guards against control events fired by programmatic updates.</summary>
+    private bool _suppressSettingEvents;
+
+    private string _settingsQuery = string.Empty;
+
+    private void RebuildSettingsList()
+    {
+        _suppressSettingEvents = true;
+        try
+        {
+            _settingRows.Clear();
+            _settingRowsById.Clear();
+
+            foreach (var device in _client.ConnectedDevices)
+            {
+                var matches = device.Rpcs
+                    .Where(rpc => rpc.IsVisibleInRpcList && MatchesSettingsQuery(rpc, device))
+                    .ToList();
+
+                if (matches.Count == 0)
+                {
+                    continue;
+                }
+
+                // Only label the group when there is more than one device;
+                // a single device's name above every setting is just noise.
+                if (_client.ConnectedDevices.Count > 1)
+                {
+                    _settingRows.Add(SettingRow.Header(device.DisplayName));
+                }
+
+                foreach (var rpc in matches)
+                {
+                    var row = new SettingRow(rpc, _client.ValueFor(rpc));
+                    _settingRowsById[rpc.Id] = row;
+                    _settingRows.Add(row);
+                }
+            }
+        }
+        finally
+        {
+            _suppressSettingEvents = false;
+        }
+
+        UpdateSettingsChrome();
+    }
+
+    private bool MatchesSettingsQuery(RpcInfo rpc, DeviceInfo device)
+    {
+        if (_settingsQuery.Length == 0)
+        {
+            return true;
+        }
+
+        return rpc.Name.Contains(_settingsQuery, StringComparison.OrdinalIgnoreCase)
+            || rpc.ArgType.Contains(_settingsQuery, StringComparison.OrdinalIgnoreCase)
+            || device.DisplayName.Contains(_settingsQuery, StringComparison.OrdinalIgnoreCase);
+    }
+
+    private void UpdateSettingsChrome()
+    {
+        var hasRows = _settingRows.Count > 0;
+        SettingsList.Visibility = hasRows ? Visibility.Visible : Visibility.Collapsed;
+        SettingsEmptyText.Visibility = hasRows ? Visibility.Collapsed : Visibility.Visible;
+
+        SettingsEmptyText.Text = !_client.IsConnected
+            ? "Connect a Twinleaf device to list settings."
+            : _settingsQuery.Length > 0
+                ? $"No settings match “{_settingsQuery}”."
+                : "This device reports no settings.";
+
+        ReloadRpcsButton.Visibility = _client.RpcCacheNeedsReload
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+        ReloadRpcsButton.IsEnabled = _client.ReloadableRpcs.Any();
+    }
+
+    private void OnSettingsSearchChanged(AutoSuggestBox sender, AutoSuggestBoxTextChangedEventArgs args)
+    {
+        if (args.Reason != AutoSuggestionBoxTextChangeReason.UserInput)
+        {
+            return;
+        }
+
+        _settingsQuery = sender.Text?.Trim() ?? string.Empty;
+        RebuildSettingsList();
+    }
+
+    private void OnReloadRpcsClicked(object sender, RoutedEventArgs e) => _client.ReloadAllRpcs();
+
+    /// <summary>Applies a readback to its row without disturbing an in-progress edit.</summary>
+    private void OnRpcValueUpdated(string rpcId)
+    {
+        if (!_settingRowsById.TryGetValue(rpcId, out var row) || row.Rpc is null)
+        {
+            return;
+        }
+
+        _suppressSettingEvents = true;
+        try
+        {
+            row.ApplyValue(_client.ValueFor(row.Rpc));
+        }
+        finally
+        {
+            _suppressSettingEvents = false;
+        }
+    }
+
+    private static SettingRow? RowFrom(object sender) =>
+        (sender as FrameworkElement)?.Tag as SettingRow;
+
+    private void OnCaptureRpcClicked(object sender, RoutedEventArgs e)
+    {
+        // Triggers the capture the way the macOS app's button does. Reading the
+        // captured buffer back is a separate view that is not ported yet.
+        if (RowFrom(sender)?.Rpc is { } rpc)
+        {
+            _client.RunRpc(rpc);
+            StatusText.Text = $"Triggered {rpc.Name}";
+        }
+    }
+
+    private void OnRunRpcClicked(object sender, RoutedEventArgs e)
+    {
+        if (RowFrom(sender)?.Rpc is { } rpc)
+        {
+            _client.RunRpc(rpc);
+            StatusText.Text = $"Ran {rpc.Name}";
+        }
+    }
+
+    private void OnRpcSwitchToggled(object sender, RoutedEventArgs e)
+    {
+        if (_suppressSettingEvents || sender is not ToggleSwitch toggle)
+        {
+            return;
+        }
+
+        if (RowFrom(sender) is not { Rpc: { } rpc })
+        {
+            return;
+        }
+
+        // Toggled also fires when the binding moves the switch to match a
+        // readback; only write when the user actually changed it.
+        var current = _client.ValueFor(rpc);
+        var deviceState = current is not null && ValueIsOn(current);
+        if (toggle.IsOn == deviceState)
+        {
+            return;
+        }
+
+        _client.WriteRpc(rpc, rpc.SwitchArgumentText(toggle.IsOn));
+    }
+
+    private static bool ValueIsOn(JsonValue value) => value switch
+    {
+        JsonValue.Bool flag => flag.Value,
+        JsonValue.Number number => number.Value != 0,
+        JsonValue.Str text => text.Value.Trim().ToLowerInvariant() is "true" or "yes" or "on" or "1",
+        _ => false,
+    };
+
+    private void OnRpcFieldFocus(object sender, RoutedEventArgs e)
+    {
+        if (RowFrom(sender) is { } row)
+        {
+            row.IsEditing = true;
+        }
+    }
+
+    private void OnRpcFieldKeyDown(object sender, KeyRoutedEventArgs e)
+    {
+        if (e.Key != Windows.System.VirtualKey.Enter)
+        {
+            return;
+        }
+
+        e.Handled = true;
+        CommitRpcField(sender);
+    }
+
+    private void OnRpcFieldCommit(object sender, RoutedEventArgs e) => CommitRpcField(sender);
+
+    private void CommitRpcField(object sender)
+    {
+        if (RowFrom(sender) is not { Rpc: { } rpc } row)
+        {
+            return;
+        }
+
+        row.IsEditing = false;
+
+        // Unchanged text is not a write: committing on every focus loss would
+        // otherwise re-send a setting each time the user tabbed past it.
+        if (row.ValueText == row.ReadOnlyText)
+        {
+            return;
+        }
+
+        if (_client.WriteRpc(rpc, row.ValueText) is null)
+        {
+            // Rejected by the type coercion — restore what the device last said
+            // rather than leaving unparseable text sitting in the field.
+            StatusText.Text = $"“{row.ValueText}” is not a valid {rpc.DisplayType} for {rpc.Name}";
+            row.ApplyValue(_client.ValueFor(rpc));
+        }
+    }
+
+    // -----------------------------------------------------------------
     // Plot
     // -----------------------------------------------------------------
 
@@ -425,6 +709,8 @@ public sealed partial class MainWindow : Window
         PauseButton.IsEnabled = connected;
 
         StatusText.Text = _client.ErrorMessage ?? _client.StatusMessage;
+
+        UpdateSettingsChrome();
 
         RecordingText.Text = _client.LogProgress is { } progress
             ? string.Format(

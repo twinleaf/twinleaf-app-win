@@ -168,6 +168,12 @@ public sealed record DeviceInfo(
         : Route;
 }
 
+/// <summary>
+/// One device setting, addressed by route and name. The control the sidebar
+/// shows is derived entirely from <see cref="ArgType"/> and the permission
+/// flags — the classification below mirrors the macOS app's <c>RpcInfo</c>
+/// so both apps present the same device identically.
+/// </summary>
 public sealed record RpcInfo(
     string Route,
     string Name,
@@ -181,6 +187,98 @@ public sealed record RpcInfo(
     JsonValue? Value)
 {
     public string Id => $"{Route}#{Name}";
+
+    /// <summary>
+    /// Whether the device described this RPC well enough to render a typed
+    /// control. Without metadata all we can offer is the raw name.
+    /// </summary>
+    public bool HasMetadata
+    {
+        get
+        {
+            var type = ArgType.Trim();
+            return !Unknown && type.Length > 0 && type != "missing";
+        }
+    }
+
+    /// <summary>Internal plumbing RPCs (<c>rpc.*</c>) are never listed.</summary>
+    public bool IsInternalRpc => Name.StartsWith("rpc.", StringComparison.Ordinal);
+
+    public bool IsVisibleInRpcList =>
+        Name.Length > 0 && !IsInternalRpc && (Readable || Writable || IsCaptureRpc);
+
+    /// <summary>Type without its generic parameters: <c>u32&lt;…&gt;</c> to <c>u32</c>.</summary>
+    public string BaseArgType
+    {
+        get
+        {
+            var index = ArgType.IndexOf('<');
+            return index < 0 ? ArgType : ArgType[..index];
+        }
+    }
+
+    public bool IsNumericRpc => BaseArgType switch
+    {
+        "u8" or "u16" or "u32" or "u64" or
+        "i8" or "i16" or "i32" or "i64" or
+        "f32" or "f64" => true,
+        _ => false,
+    };
+
+    public bool IsIntegerRpc => BaseArgType switch
+    {
+        "u8" or "u16" or "u32" or "u64" or
+        "i8" or "i16" or "i32" or "i64" => true,
+        _ => false,
+    };
+
+    public bool IsUnsignedIntegerRpc => BaseArgType switch
+    {
+        "u8" or "u16" or "u32" or "u64" => true,
+        _ => false,
+    };
+
+    /// <summary>Rendered as a switch rather than a text field.</summary>
+    public bool IsEnableSwitchRpc => HasMetadata && BaseArgType == "bool";
+
+    /// <summary>Takes no argument — rendered as a button that just fires.</summary>
+    public bool IsActionRpc => Writable && HasMetadata && BaseArgType == "unit";
+
+    public bool IsCaptureRpc =>
+        BaseArgType == "capture" || Name.EndsWith(".capture", StringComparison.Ordinal);
+
+    /// <summary>An editable value field, as opposed to a button or a switch.</summary>
+    public bool IsEditableSetting =>
+        Writable && HasMetadata && !IsActionRpc && !IsCaptureRpc && !IsEnableSwitchRpc;
+
+    /// <summary>Placeholder shown in an empty value field.</summary>
+    public string DisplayType =>
+        IsActionRpc ? "action"
+        : IsCaptureRpc ? "capture"
+        : IsEnableSwitchRpc ? "bool"
+        : HasMetadata ? ArgType
+        : "unknown";
+
+    /// <summary>
+    /// Current value as a switch position. Devices are inconsistent about
+    /// whether a boolean setting reads back as a bool, a number or a string,
+    /// so all three are accepted.
+    /// </summary>
+    public bool SwitchValue => Value switch
+    {
+        JsonValue.Bool value => value.Value,
+        JsonValue.Number value => value.Value != 0,
+        JsonValue.Str value => value.Value.Trim().ToLowerInvariant()
+            is "true" or "yes" or "on" or "1",
+        _ => false,
+    };
+
+    /// <summary>Text to send when the switch is toggled, in the device's own type.</summary>
+    public string SwitchArgumentText(bool enabled) => BaseArgType switch
+    {
+        "bool" or "string" => enabled ? "true" : "false",
+        _ => enabled ? "1" : "0",
+    };
 }
 
 /// <summary>What the plot is showing.</summary>

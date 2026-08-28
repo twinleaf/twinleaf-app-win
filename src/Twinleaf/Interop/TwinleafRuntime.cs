@@ -164,9 +164,55 @@ public sealed unsafe class TwinleafRuntime : IDisposable
             viewportEnd ?? 0.0);
     }
 
-    public void CallRpc(string requestId, string route, string name, JsonValue? argument)
+    /// <summary>
+    /// Calls an RPC through the typed entry point. Passing the argument as a
+    /// tagged union rather than JSON keeps <c>u64</c>, <c>i64</c> and <c>f64</c>
+    /// distinct all the way to the device — JSON would collapse all three to a
+    /// double. This is the path the macOS app uses.
+    ///
+    /// An argument of <see cref="RpcArgument.None"/> means "no argument", which
+    /// the core reads as an RPC read rather than a write.
+    /// </summary>
+    public void CallRpc(string requestId, string route, string name, RpcArgument argument)
     {
-        if (IsValid) CoreFfi.RuntimeCallRpc(_handle, requestId, route, name, argument?.ToJsonString());
+        if (!IsValid)
+        {
+            return;
+        }
+
+        // The core copies everything it needs before returning, so the native
+        // allocations only have to outlive the call itself.
+        var requestPtr = Marshal.StringToCoTaskMemUTF8(requestId);
+        var routePtr = Marshal.StringToCoTaskMemUTF8(route);
+        var namePtr = Marshal.StringToCoTaskMemUTF8(name);
+        var stringPtr = argument.Tag == RpcArgument.TagString
+            ? Marshal.StringToCoTaskMemUTF8(argument.StringValue ?? string.Empty)
+            : nint.Zero;
+
+        try
+        {
+            var arg = new CoreFfi.RpcArg
+            {
+                Tag = argument.Tag,
+                BoolValue = argument.BoolValue ? (byte)1 : (byte)0,
+                IntValue = argument.IntValue,
+                UIntValue = argument.UIntValue,
+                DoubleValue = argument.DoubleValue,
+                StringValue = (byte*)stringPtr,
+            };
+
+            CoreFfi.RuntimeCallRpcValue(_handle, requestPtr, routePtr, namePtr, &arg);
+        }
+        finally
+        {
+            Marshal.FreeCoTaskMem(requestPtr);
+            Marshal.FreeCoTaskMem(routePtr);
+            Marshal.FreeCoTaskMem(namePtr);
+            if (stringPtr != nint.Zero)
+            {
+                Marshal.FreeCoTaskMem(stringPtr);
+            }
+        }
     }
 
     public void CheckUpgrade()

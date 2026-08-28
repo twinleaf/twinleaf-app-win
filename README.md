@@ -100,6 +100,18 @@ cargo run --manifest-path vendor/twinleaf-rust/Cargo.toml --bin tio -- simulate
 The Rust core also builds a CLI harness (`tio-bridge`) that speaks the same
 events over stdout, which is useful for isolating core behaviour from the UI.
 
+The app itself can be driven unattended through environment hooks, which is how
+the milestones above are verified without a human at the keyboard:
+
+| variable | effect |
+| --- | --- |
+| `TWINLEAF_SELFTEST_CONNECT=<url>` | connect on launch and plot the first column |
+| `TWINLEAF_SELFTEST_RPC=name=value[,…]` | write settings once metadata lands, logging each reply |
+| `TWINLEAF_SELFTEST_QUIT=<seconds>` | exit after N seconds with a summary |
+
+Diagnostics go to stderr. `TWINLEAF_DEBUG=1` additionally enables the core's own
+tracing, matching the macOS app and `tio-bridge`.
+
 ## Status
 
 Working end to end:
@@ -111,10 +123,14 @@ Working end to end:
 - Live device discovery, connect/disconnect, stream + column metadata, channel
   sidebar with live value readout, and a Win2D plot with linear/log axes, nice
   ticks, legend and crosshair readout.
+- Settings sidebar: every device RPC with the control its type implies — value
+  field, switch, action button or capture trigger — plus search, live readback
+  and a refresh affordance when the device reports its cached values stale.
 
-Not yet ported from the macOS app: the RPC sidebar, `.tio` document
-open/playback scrubber, CSV/HDF5 export UI, firmware-update popover, multi-pane
-layout with drag-and-drop, and preferences.
+Not yet ported from the macOS app: the `.tio` document open/playback scrubber,
+CSV/HDF5 export UI, firmware-update popover, multi-pane layout with
+drag-and-drop, RPC sliders, favourites, the capture *viewer* (the capture
+trigger works), and preferences.
 
 ## License
 

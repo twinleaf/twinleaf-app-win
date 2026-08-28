@@ -25,6 +25,13 @@ public sealed partial class SplitterThumb : UserControl
     /// <summary>The column this handle resizes.</summary>
     public ColumnDefinition? TargetColumn { get; set; }
 
+    /// <summary>
+    /// Set for a handle on the <em>left</em> edge of its target — a right-hand
+    /// sidebar — where dragging right must shrink the column rather than grow
+    /// it.
+    /// </summary>
+    public bool Invert { get; set; }
+
     public SplitterThumb()
     {
         Width = 6;
@@ -73,7 +80,7 @@ public sealed partial class SplitterThumb : UserControl
         }
 
         var delta = e.GetCurrentPoint(null).Position.X - _startX;
-        var width = Math.Max(TargetColumn.MinWidth, _startWidth + delta);
+        var width = Math.Max(TargetColumn.MinWidth, _startWidth + (Invert ? -delta : delta));
         TargetColumn.Width = new GridLength(width, GridUnitType.Pixel);
         e.Handled = true;
     }
