@@ -13,6 +13,8 @@
             <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
             <RowDefinition Height="*" />
+            <!-- Playback scrubber; only shown for a loaded .tio -->
+            <RowDefinition Height="Auto" />
             <RowDefinition Height="Auto" />
         </Grid.RowDefinitions>
 
@@ -61,6 +63,14 @@
             </CommandBar.Content>
 
             <AppBarButton x:Name="RefreshButton" Click="OnRefreshClicked" Icon="Refresh" Label="Refresh" />
+            <AppBarSeparator />
+            <AppBarButton x:Name="OpenButton" Click="OnOpenLogClicked" Icon="OpenFile" Label="Open" />
+            <AppBarButton x:Name="SaveButton" Click="OnSaveClicked" Icon="Save" Label="Save" />
+            <AppBarButton x:Name="SaveAsButton" Click="OnSaveAsClicked" Label="Save As">
+                <AppBarButton.Icon>
+                    <FontIcon Glyph="&#xE792;" />
+                </AppBarButton.Icon>
+            </AppBarButton>
             <AppBarSeparator />
             <AppBarToggleButton x:Name="RecordButton" Click="OnRecordClicked" Label="Record">
                 <AppBarToggleButton.Icon>
@@ -343,29 +353,79 @@
             </Grid>
         </Grid>
 
+        <!-- Playback scrubber, for an opened .tio -->
+        <Grid
+            x:Name="PlaybackBar"
+            Grid.Row="3"
+            Padding="12,6"
+            ColumnSpacing="10"
+            Visibility="Collapsed">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <TextBlock
+                x:Name="PlaybackElapsedText"
+                Grid.Column="0"
+                VerticalAlignment="Center"
+                FontFamily="Consolas"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Style="{StaticResource CaptionTextBlockStyle}" />
+
+            <Slider
+                x:Name="PlaybackSlider"
+                Grid.Column="1"
+                VerticalAlignment="Center"
+                AutomationProperties.Name="Playback position"
+                Header=""
+                ThumbToolTipValueConverter="{x:Null}"
+                ToolTipService.ToolTip="Scrub through the loaded log"
+                ValueChanged="OnPlaybackSliderChanged" />
+
+            <TextBlock
+                x:Name="PlaybackTotalText"
+                Grid.Column="2"
+                VerticalAlignment="Center"
+                FontFamily="Consolas"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Style="{StaticResource CaptionTextBlockStyle}" />
+        </Grid>
+
         <!-- Status bar -->
         <Grid
-            Grid.Row="3"
+            Grid.Row="4"
             Padding="12,6"
             Background="{ThemeResource LayerFillColorDefaultBrush}"
             BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
             BorderThickness="0,1,0,0"
             ColumnSpacing="12">
             <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="Auto" />
                 <ColumnDefinition Width="*" />
                 <ColumnDefinition Width="Auto" />
             </Grid.ColumnDefinitions>
 
             <TextBlock
-                x:Name="StatusText"
+                x:Name="DocumentText"
                 Grid.Column="0"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Style="{StaticResource CaptionTextBlockStyle}"
+                Text="Untitled.tio"
+                ToolTipService.ToolTip="Current .tio log" />
+
+            <TextBlock
+                x:Name="StatusText"
+                Grid.Column="1"
+                Margin="12,0"
                 Style="{StaticResource CaptionTextBlockStyle}"
                 Text="Idle"
                 TextTrimming="CharacterEllipsis" />
 
             <TextBlock
                 x:Name="RecordingText"
-                Grid.Column="1"
+                Grid.Column="2"
                 FontFamily="Consolas"
                 Foreground="{ThemeResource TextFillColorSecondaryBrush}"
                 Style="{StaticResource CaptionTextBlockStyle}" />

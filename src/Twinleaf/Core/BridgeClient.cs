@@ -110,6 +110,62 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
         private set => Set(ref _playback, value);
     }
 
+    private bool _isInspectionMode;
+
+    /// <summary>
+    /// True while showing a saved <c>.tio</c> rather than a live device. The
+    /// plot is paused-only and settings cannot be queried.
+    /// </summary>
+    public bool IsInspectionMode
+    {
+        get => _isInspectionMode;
+        private set => Set(ref _isInspectionMode, value);
+    }
+
+    private double _playbackPosition;
+
+    /// <summary>Right edge of the displayed window, in log time.</summary>
+    public double PlaybackPosition
+    {
+        get => _playbackPosition;
+        private set => Set(ref _playbackPosition, value);
+    }
+
+    public double PlaybackStart { get; private set; }
+
+    public double PlaybackEnd { get; private set; }
+
+    public bool HasPlaybackRange => PlaybackEnd > PlaybackStart;
+
+    /// <summary>
+    /// Whether there is anything to scrub: a log shorter than one plot window
+    /// is shown whole, so the slider would have nowhere to travel.
+    /// </summary>
+    public bool CanScrubPlayback => PlaybackEnd - PlaybackStart > View.WindowSeconds;
+
+    /// <summary>
+    /// Slider bounds. The position is the window's <em>right</em> edge, so it
+    /// cannot go earlier than one window-width past the start of the log.
+    /// </summary>
+    public (double Min, double Max) PlaybackSliderRange
+    {
+        get
+        {
+            if (!HasPlaybackRange)
+            {
+                return (0, 0);
+            }
+
+            return (Math.Min(PlaybackStart + View.WindowSeconds, PlaybackEnd), PlaybackEnd);
+        }
+    }
+
+    /// <summary>Seconds of data the log covers.</summary>
+    public double? LogElapsedSeconds { get; private set; }
+
+    /// <summary>Wall-clock time at the start of the logged data.</summary>
+    public double? LogTimeReferenceStart { get; private set; }
+
     private bool _isRecording;
     public bool IsRecording
     {
@@ -143,9 +199,19 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
     public void SetDiscovery(bool active, bool includeAll = false) =>
         _runtime.SetDiscovery(active, includeAll);
 
+    /// <summary>
+    /// Connects to a device. <paramref name="logPath"/> is the document's
+    /// temporary log; the core needs it up front so recording can be switched on
+    /// mid-session without reconnecting.
+    /// </summary>
     public void Connect(string url, string? route = null, string? logPath = null)
     {
         ErrorMessage = null;
+        IsInspectionMode = false;
+        Playback = null;
+        PlaybackStart = 0;
+        PlaybackEnd = 0;
+        PlaybackPosition = 0;
         Phase = ConnectionPhase.Connecting;
         StatusMessage = $"Connecting to {url}…";
         ConnectedUrl = url;
@@ -163,6 +229,12 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
         _streamValues.Clear();
         _rpcValues.Clear();
         RpcCacheNeedsReload = false;
+        IsInspectionMode = false;
+        IsRecording = false;
+        Playback = null;
+        PlaybackStart = 0;
+        PlaybackEnd = 0;
+        PlaybackPosition = 0;
         SelectionChanged?.Invoke();
         OnPropertyChanged(nameof(IsConnected));
     }
@@ -173,14 +245,49 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
         IsRecording = enabled;
     }
 
+    /// <summary>
+    /// Loads a saved log for inspection. Clears live state first: the previous
+    /// session's devices, selections and readbacks describe a different device
+    /// than the one the log was recorded from.
+    /// </summary>
     public void OpenLog(string path)
     {
         ErrorMessage = null;
-        StatusMessage = $"Opening {path}…";
+        IsInspectionMode = true;
+        RpcCacheNeedsReload = false;
+
+        ConnectedDevices.Clear();
+        _selectedColumns.Clear();
+        _streamValues.Clear();
+        _rpcValues.Clear();
+        LogMessages.Clear();
+
+        PlaybackStart = 0;
+        PlaybackEnd = 0;
+        PlaybackPosition = 0;
+        Playback = null;
+        LogProgress = null;
+        LogElapsedSeconds = null;
+        LogTimeReferenceStart = null;
+
+        SelectionChanged?.Invoke();
+        OnPropertyChanged(nameof(IsConnected));
+
+        StatusMessage = $"Opening {System.IO.Path.GetFileName(path)}…";
         _runtime.OpenLog(path);
     }
 
-    public void SetPlaybackPosition(double position) => _runtime.SetPlayback(position);
+    /// <summary>
+    /// Moves the displayed window through the log. The position is clamped to
+    /// the slider range so the window never runs off either end.
+    /// </summary>
+    public void SetPlaybackPosition(double position)
+    {
+        var (min, max) = PlaybackSliderRange;
+        var clamped = Math.Clamp(position, min, max);
+        PlaybackPosition = clamped;
+        _runtime.SetPlayback(clamped);
+    }
 
     public string ExportLog(string sourcePath, string outputPath, ExportFormat format)
     {
@@ -416,6 +523,7 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
                 RpcCacheNeedsReload = false;
                 ReplaceAll(ConnectedDevices, metadata.Devices);
                 PruneSelection();
+                EnableDefaultStreamSelection();
                 LoadReadableRpcs();
                 break;
 
@@ -448,10 +556,12 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
 
             case CoreEvent.Progress progress:
                 LogProgress = progress.State;
+                LogElapsedSeconds = progress.State.ElapsedSeconds;
+                LogTimeReferenceStart = SanitizedTimeReference(progress.State.TimeReferenceStart);
                 break;
 
             case CoreEvent.Playback playback:
-                Playback = playback.State;
+                ApplyPlayback(playback.State);
                 break;
 
             case CoreEvent.DeviceLogMessage message:
@@ -502,6 +612,38 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
     public event Action<CoreEvent.ViewData>? ViewDataReceived;
 
     /// <summary>
+    /// A playback event only ever describes a loaded log, so its arrival is what
+    /// puts the app into inspection mode — the core sends it after
+    /// <c>openLog</c> succeeds and after every scrub.
+    /// </summary>
+    private void ApplyPlayback(PlaybackState state)
+    {
+        IsInspectionMode = true;
+        Playback = state;
+        PlaybackStart = state.Start;
+        PlaybackEnd = state.End;
+        PlaybackPosition = state.Position;
+
+        var start = state.RecordingStart ?? (double.IsFinite(state.Start) ? state.Start : (double?)null);
+        LogTimeReferenceStart = SanitizedTimeReference(state.TimeReferenceStart);
+        LogElapsedSeconds = start is { } from && double.IsFinite(state.End)
+            ? Math.Max(0, state.End - from)
+            : null;
+
+        PlaybackChanged?.Invoke();
+    }
+
+    /// <summary>Raised when the playback range or position changes.</summary>
+    public event Action? PlaybackChanged;
+
+    /// <summary>
+    /// Drops a time reference that is not a plausible wall-clock time. Devices
+    /// that have never been time-synced report 0, which would render as 1970.
+    /// </summary>
+    private static double? SanitizedTimeReference(double? seconds) =>
+        seconds is { } value && double.IsFinite(value) && value > 0 ? value : null;
+
+    /// <summary>
     /// Caches a successful readback. The reply carries the route and name
     /// rather than the request id we sent, so results from a reload land on the
     /// right rows without tracking every in-flight request.
@@ -533,6 +675,9 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
 
         var phase = status.State switch
         {
+            // "inspection" and "logging" describe what the core is doing, not
+            // the connection, so they leave the phase alone.
+            "inspection" or "logging" or "loading" => null,
             "ready" or "idle" or "disconnected" => ConnectionPhase.Idle,
             "connecting" => ConnectionPhase.Connecting,
             "connected" => ConnectionPhase.Connected,
@@ -557,6 +702,40 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
         while (LogMessages.Count > MaxLogMessages)
         {
             LogMessages.RemoveAt(0);
+        }
+    }
+
+    /// <summary>
+    /// Plots something sensible as soon as metadata lands, so a fresh connection
+    /// or an opened log is not an empty canvas.
+    ///
+    /// Picks the lowest-numbered stream that actually carries columns, not
+    /// stream 1: some devices put their data on stream 0 (the macOS app was
+    /// hardcoded to 1 and skipped those). Only runs when nothing is selected, so
+    /// it never overrides the user.
+    /// </summary>
+    private void EnableDefaultStreamSelection()
+    {
+        if (_selectedColumns.Count > 0)
+        {
+            return;
+        }
+
+        foreach (var device in ConnectedDevices)
+        {
+            var stream = device.Streams
+                .Where(candidate => candidate.Columns.Count > 0)
+                .OrderBy(candidate => candidate.StreamId)
+                .FirstOrDefault();
+
+            if (stream is null)
+            {
+                continue;
+            }
+
+            _selectedColumns.AddRange(stream.Columns.Select(column => column.Key));
+            PushSelection();
+            return;
         }
     }
 

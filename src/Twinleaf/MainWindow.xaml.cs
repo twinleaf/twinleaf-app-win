@@ -8,7 +8,10 @@ using System.Globalization;
 using System.Linq;
 using Microsoft.UI.Xaml;
 using Microsoft.UI.Xaml.Controls;
+using Microsoft.UI.Xaml.Controls.Primitives;
 using Microsoft.UI.Xaml.Input;
+using Windows.Storage.Pickers;
+using WinRT.Interop;
 using Twinleaf.Controls;
 using Twinleaf.Core;
 using Twinleaf.Models;
@@ -50,6 +53,7 @@ public sealed partial class MainWindow : Window
         _client.SelectionChanged += SyncChannelSelection;
         _client.PlotFrameReceived += OnPlotFrame;
         _client.RpcValueUpdated += OnRpcValueUpdated;
+        _client.PlaybackChanged += OnPlaybackChanged;
 
         ChannelTree.ItemsSource = _channelRoots;
         SettingsList.ItemsSource = _settingRows;
@@ -67,7 +71,10 @@ public sealed partial class MainWindow : Window
         Closed += (_, _) =>
         {
             _client.SetDiscovery(active: false);
+            // Dispose the client first: it joins the core's threads, so the
+            // temporary log is closed by the time we try to delete it.
             _client.Dispose();
+            _document.Dispose();
         };
     }
 
@@ -90,6 +97,19 @@ public sealed partial class MainWindow : Window
             // Tick the first available column once metadata lands, so the test
             // exercises the plot path and not just the connection.
             _client.ConnectedDevices.CollectionChanged += SelfTestSelectFirstColumn;
+        }
+
+        // TWINLEAF_SELFTEST_OPEN=<path> opens a saved .tio for inspection.
+        var openPath = Environment.GetEnvironmentVariable("TWINLEAF_SELFTEST_OPEN");
+        if (!string.IsNullOrWhiteSpace(openPath))
+        {
+            _client.PlaybackChanged += () => AppLog.Error(
+                $"[selftest] playback start={_client.PlaybackStart:F3} end={_client.PlaybackEnd:F3} " +
+                $"pos={_client.PlaybackPosition:F3} span={_client.PlaybackEnd - _client.PlaybackStart:F3}s " +
+                $"canScrub={_client.CanScrubPlayback} inspection={_client.IsInspectionMode}");
+
+            AppLog.Error($"[selftest] opening {openPath}");
+            OpenDocument(openPath.Trim());
         }
 
         // TWINLEAF_SELFTEST_RPC="name=value[,name=value]" writes settings once
@@ -215,7 +235,9 @@ public sealed partial class MainWindow : Window
             return;
         }
 
-        _client.Connect(url);
+        // The core needs the log path up front so Record can be switched on
+        // mid-session without reconnecting.
+        _client.Connect(url, logPath: _document.TemporaryPath);
     }
 
     /// <summary>An explicitly typed URL wins over the picker selection.</summary>
@@ -233,9 +255,11 @@ public sealed partial class MainWindow : Window
     private void OnRecordClicked(object sender, RoutedEventArgs e)
     {
         var enabled = RecordButton.IsChecked == true;
-        // A null path lets the core pick its own temporary backing file, which
-        // is what the macOS app does until the document is saved.
-        _client.SetRecording(enabled, logPath: null);
+        // The core rejects logging with no path, so recording always targets the
+        // document's temporary file; Save snapshots it to wherever the user
+        // chooses, which is what lets an untitled window record straight away.
+        _client.SetRecording(enabled, _document.TemporaryPath);
+        UpdateChrome();
     }
 
     private void OnPauseClicked(object sender, RoutedEventArgs e)
@@ -443,6 +467,165 @@ public sealed partial class MainWindow : Window
         }
 
         return key.ToString();
+    }
+
+    // -----------------------------------------------------------------
+    // .tio document
+    // -----------------------------------------------------------------
+
+    private TioDocument _document = new();
+
+    /// <summary>Guards the slider against the value changes we make ourselves.</summary>
+    private bool _suppressPlaybackEvents;
+
+    private async void OnOpenLogClicked(object sender, RoutedEventArgs e)
+    {
+        var picker = new FileOpenPicker();
+        // Unpackaged apps have no implicit window to parent the dialog to.
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeFilter.Add(".tio");
+        picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
+
+        var file = await picker.PickSingleFileAsync();
+        if (file is null)
+        {
+            return;
+        }
+
+        OpenDocument(file.Path);
+    }
+
+    private void OpenDocument(string path)
+    {
+        try
+        {
+            var document = TioDocument.Open(path);
+            _document.Dispose();
+            _document = document;
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Could not open {System.IO.Path.GetFileName(path)}: {exception.Message}";
+            AppLog.Error($"open failed: {exception}");
+            return;
+        }
+
+        // Inspect the copy, not the original: the core keeps the file open, and
+        // a later recording would otherwise append to the user's saved log.
+        _client.OpenLog(_document.TemporaryPath);
+        UpdateChrome();
+    }
+
+    private void OnSaveClicked(object sender, RoutedEventArgs e)
+    {
+        if (_document.SavedPath is null)
+        {
+            OnSaveAsClicked(sender, e);
+            return;
+        }
+
+        SaveDocumentTo(_document.SavedPath);
+    }
+
+    private async void OnSaveAsClicked(object sender, RoutedEventArgs e)
+    {
+        var picker = new FileSavePicker();
+        InitializeWithWindow.Initialize(picker, WindowNative.GetWindowHandle(this));
+        picker.FileTypeChoices.Add("Twinleaf log", [".tio"]);
+        picker.SuggestedFileName = System.IO.Path.GetFileNameWithoutExtension(_document.DisplayName);
+        picker.SuggestedStartLocation = PickerLocationId.DocumentsLibrary;
+
+        var file = await picker.PickSaveFileAsync();
+        if (file is null)
+        {
+            return;
+        }
+
+        SaveDocumentTo(file.Path);
+    }
+
+    private void SaveDocumentTo(string path)
+    {
+        try
+        {
+            _document.SaveTo(path);
+            StatusText.Text = $"Saved {FormatBytes((ulong)_document.ByteCount)} to {System.IO.Path.GetFileName(path)}";
+        }
+        catch (Exception exception)
+        {
+            StatusText.Text = $"Could not save: {exception.Message}";
+            AppLog.Error($"save failed: {exception}");
+        }
+
+        UpdateChrome();
+    }
+
+    // -----------------------------------------------------------------
+    // Playback scrubber
+    // -----------------------------------------------------------------
+
+    private void OnPlaybackChanged()
+    {
+        _suppressPlaybackEvents = true;
+        try
+        {
+            // The slider works in seconds elapsed from the start of the log, not
+            // absolute log time. Log timestamps are Unix epoch seconds (~1.79e9);
+            // handing those to a Slider gives it a range of billions of steps,
+            // which its step arithmetic will not accept — and elapsed seconds are
+            // what the axis and the labels show anyway.
+            var (min, max) = _client.PlaybackSliderRange;
+            var start = _client.PlaybackStart;
+
+            PlaybackSlider.Minimum = Math.Max(0, min - start);
+            PlaybackSlider.Maximum = Math.Max(PlaybackSlider.Minimum + 0.001, max - start);
+            PlaybackSlider.StepFrequency = Math.Max(0.001, (PlaybackSlider.Maximum - PlaybackSlider.Minimum) / 1000);
+            PlaybackSlider.Value = Math.Clamp(
+                _client.PlaybackPosition - start,
+                PlaybackSlider.Minimum,
+                PlaybackSlider.Maximum);
+            PlaybackSlider.IsEnabled = _client.CanScrubPlayback;
+
+            PlaybackElapsedText.Text = FormatPlaybackTime(_client.PlaybackPosition - start);
+            PlaybackTotalText.Text = FormatPlaybackTime(_client.PlaybackEnd - start);
+        }
+        finally
+        {
+            _suppressPlaybackEvents = false;
+        }
+
+        UpdateChrome();
+    }
+
+    private void OnPlaybackSliderChanged(object sender, RangeBaseValueChangedEventArgs e)
+    {
+        if (_suppressPlaybackEvents || !_client.IsInspectionMode)
+        {
+            return;
+        }
+
+        // Slider values are elapsed seconds; the core wants absolute log time.
+        _client.SetPlaybackPosition(_client.PlaybackStart + e.NewValue);
+
+        PlaybackElapsedText.Text = FormatPlaybackTime(_client.PlaybackPosition - _client.PlaybackStart);
+    }
+
+    /// <summary>m:ss, or h:mm:ss once the log runs past an hour.</summary>
+    private static string FormatPlaybackTime(double seconds)
+    {
+        if (!double.IsFinite(seconds))
+        {
+            return "--:--";
+        }
+
+        var total = Math.Max(0, (int)Math.Round(seconds));
+        var hours = total / 3600;
+        var minutes = total % 3600 / 60;
+        var secs = total % 60;
+
+        return hours > 0
+            ? $"{hours}:{minutes:00}:{secs:00}"
+            : $"{minutes}:{secs:00}";
     }
 
     // -----------------------------------------------------------------
@@ -701,12 +884,40 @@ public sealed partial class MainWindow : Window
     private void UpdateChrome()
     {
         var connected = _client.IsConnected;
+        var inspecting = _client.IsInspectionMode;
 
         ConnectButtonText.Text = connected ? "Disconnect" : "Connect";
         DeviceCombo.IsEnabled = !connected;
         UrlBox.IsEnabled = !connected;
-        RecordButton.IsEnabled = connected;
-        PauseButton.IsEnabled = connected;
+        // A loaded log is a fixed recording: there is nothing to record and
+        // nothing to pause, and the scrubber is what moves through it.
+        RecordButton.IsEnabled = connected && !inspecting;
+        PauseButton.IsEnabled = connected && !inspecting;
+
+        PlaybackBar.Visibility = inspecting && _client.HasPlaybackRange
+            ? Visibility.Visible
+            : Visibility.Collapsed;
+
+        SaveButton.IsEnabled = !_document.IsEmpty;
+        SaveAsButton.IsEnabled = !_document.IsEmpty;
+
+        var badges = new List<string> { _document.DisplayName };
+        if (_document.SavedPath is null && !_document.IsEmpty)
+        {
+            badges.Add("unsaved");
+        }
+
+        if (inspecting)
+        {
+            badges.Add("inspection");
+        }
+
+        if (_client.LogElapsedSeconds is { } elapsed && elapsed > 0)
+        {
+            badges.Add(FormatPlaybackTime(elapsed));
+        }
+
+        DocumentText.Text = string.Join("  ·  ", badges);
 
         StatusText.Text = _client.ErrorMessage ?? _client.StatusMessage;
 

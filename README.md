@@ -33,6 +33,14 @@ twinleaf-app-win/
   vendor/twinleaf-rust/  # submodule, pinned to the macOS app's commit
 ```
 
+### Documents
+
+Recording always writes to a temporary `.tio`, and Save snapshots that file to
+the chosen path — the same model the macOS app uses. That ordering is what lets
+an untitled window start recording immediately and keep recording across the
+save: the core appends to a path that never moves. Opening a log copies it to the
+document's temporary file first, so inspecting a saved log can never write to it.
+
 ### The boundary
 
 The core owns everything hardware-facing: device I/O through `twinleaf-rust`,
@@ -107,6 +115,7 @@ the milestones above are verified without a human at the keyboard:
 | --- | --- |
 | `TWINLEAF_SELFTEST_CONNECT=<url>` | connect on launch and plot the first column |
 | `TWINLEAF_SELFTEST_RPC=name=value[,…]` | write settings once metadata lands, logging each reply |
+| `TWINLEAF_SELFTEST_OPEN=<path>` | open a saved `.tio` for inspection |
 | `TWINLEAF_SELFTEST_QUIT=<seconds>` | exit after N seconds with a summary |
 
 Diagnostics go to stderr. `TWINLEAF_DEBUG=1` additionally enables the core's own
@@ -126,11 +135,13 @@ Working end to end:
 - Settings sidebar: every device RPC with the control its type implies — value
   field, switch, action button or capture trigger — plus search, live readback
   and a refresh affordance when the device reports its cached values stale.
+- `.tio` documents: record to a temporary log, Save/Save As to snapshot it, and
+  Open an existing log for inspection with a playback scrubber. A recording made
+  by the app reads back cleanly in `tio log inspect`.
 
-Not yet ported from the macOS app: the `.tio` document open/playback scrubber,
-CSV/HDF5 export UI, firmware-update popover, multi-pane layout with
-drag-and-drop, RPC sliders, favourites, the capture *viewer* (the capture
-trigger works), and preferences.
+Not yet ported from the macOS app: CSV/HDF5 export UI, firmware-update popover,
+multi-pane layout with drag-and-drop, RPC sliders, favourites, the capture
+*viewer* (the capture trigger works), and preferences.
 
 ## License
 
