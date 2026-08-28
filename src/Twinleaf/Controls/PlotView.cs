@@ -136,14 +136,30 @@ public sealed partial class PlotView : UserControl
         var logX = isFft && _view.FftLogX;
         var logY = isFft ? _view.FftLogY : _view.LogY;
 
-        var (xMin, xMax, yMin, yMax) = Bounds(series, logX, logY);
+        // Timeseries x values are absolute epoch seconds. Plotting them raw
+        // makes every tick label collapse to the same text — a 10 s window is
+        // nine significant digits into a ~1.79e9 timestamp — so the axis is
+        // drawn relative to the window end instead: 0 at the right edge,
+        // negative seconds going back.
+        var timeOrigin = isFft ? 0.0 : TimeOrigin(series);
+
+        var (xMin, xMax, yMin, yMax) = Bounds(series, logX, logY, timeOrigin);
+
+        if (!isFft)
+        {
+            // Anchor to the requested window rather than to what has arrived, so
+            // the trace scrolls through a fixed span instead of rescaling with
+            // every frame. Matches the macOS app's (end - window)...end range.
+            xMin = -Math.Max(_view.WindowSeconds, 1e-6);
+            xMax = 0;
+        }
 
         var xAxis = new AxisScale(xMin, xMax, plotLeft, plotRight, logX);
         // Screen Y grows downward, so the pixel range is inverted.
         var yAxis = new AxisScale(yMin, yMax, plotBottom, plotTop, logY);
 
         DrawGrid(session, palette, xAxis, yAxis, plotLeft, plotTop, plotRight, plotBottom);
-        DrawTraces(session, series, xAxis, yAxis, plotLeft, plotTop, plotRight, plotBottom);
+        DrawTraces(session, series, xAxis, yAxis, timeOrigin, plotLeft, plotTop, plotRight, plotBottom);
         DrawFrame(session, palette, plotLeft, plotTop, plotRight, plotBottom);
         DrawAxisTitles(session, palette, isFft, plotLeft, plotRight, plotBottom, height);
         DrawLegend(session, palette, series, plotLeft, plotTop, plotRight);
@@ -162,10 +178,39 @@ public sealed partial class PlotView : UserControl
         return _frame.Series.Where(item => item.Points.Count > 0).ToList();
     }
 
+    /// <summary>
+    /// The absolute time that maps to x = 0. The core's <c>viewportEnd</c> is
+    /// authoritative when present; otherwise the newest sample stands in, which
+    /// is what the macOS app falls back to.
+    /// </summary>
+    private double TimeOrigin(IReadOnlyList<PlotSeries> series)
+    {
+        if (_frame?.ViewportEnd is { } end && double.IsFinite(end))
+        {
+            return end;
+        }
+
+        var newest = double.MinValue;
+        foreach (var item in series)
+        {
+            for (var index = item.Points.Count - 1; index >= 0; index--)
+            {
+                if (double.IsFinite(item.Points[index].X))
+                {
+                    newest = Math.Max(newest, item.Points[index].X);
+                    break;
+                }
+            }
+        }
+
+        return newest > double.MinValue ? newest : 0.0;
+    }
+
     private static (double XMin, double XMax, double YMin, double YMax) Bounds(
         IReadOnlyList<PlotSeries> series,
         bool logX,
-        bool logY)
+        bool logY,
+        double timeOrigin)
     {
         var xMin = double.MaxValue;
         var xMax = double.MinValue;
@@ -181,13 +226,15 @@ public sealed partial class PlotView : UserControl
                     continue;
                 }
 
+                var x = point.X - timeOrigin;
+
                 // A log axis cannot show non-positive samples; excluding them
                 // from the bounds keeps the visible decades meaningful.
-                if (logX && point.X <= 0) continue;
+                if (logX && x <= 0) continue;
                 if (logY && point.Y <= 0) continue;
 
-                if (point.X < xMin) xMin = point.X;
-                if (point.X > xMax) xMax = point.X;
+                if (x < xMin) xMin = x;
+                if (x > xMax) xMax = x;
                 if (point.Y < yMin) yMin = point.Y;
                 if (point.Y > yMax) yMax = point.Y;
             }
@@ -272,6 +319,7 @@ public sealed partial class PlotView : UserControl
         IReadOnlyList<PlotSeries> series,
         AxisScale xAxis,
         AxisScale yAxis,
+        double timeOrigin,
         float left,
         float top,
         float right,
@@ -283,7 +331,7 @@ public sealed partial class PlotView : UserControl
         {
             var item = series[index];
             var color = TraceColors[index % TraceColors.Length];
-            DrawSeries(session, item, color, xAxis, yAxis);
+            DrawSeries(session, item, color, xAxis, yAxis, timeOrigin);
         }
     }
 
@@ -292,7 +340,8 @@ public sealed partial class PlotView : UserControl
         PlotSeries series,
         Color color,
         AxisScale xAxis,
-        AxisScale yAxis)
+        AxisScale yAxis,
+        double timeOrigin)
     {
         var points = series.Points;
         if (points.Count == 0)
@@ -302,7 +351,7 @@ public sealed partial class PlotView : UserControl
 
         if (points.Count == 1)
         {
-            var only = new Vector2((float)xAxis.ToPixel(points[0].X), (float)yAxis.ToPixel(points[0].Y));
+            var only = new Vector2((float)xAxis.ToPixel(points[0].X - timeOrigin), (float)yAxis.ToPixel(points[0].Y));
             session.FillCircle(only, 2f, color);
             return;
         }
@@ -325,7 +374,7 @@ public sealed partial class PlotView : UserControl
                 continue;
             }
 
-            var position = new Vector2((float)xAxis.ToPixel(point.X), (float)yAxis.ToPixel(point.Y));
+            var position = new Vector2((float)xAxis.ToPixel(point.X - timeOrigin), (float)yAxis.ToPixel(point.Y));
             if (!float.IsFinite(position.X) || !float.IsFinite(position.Y))
             {
                 continue;

@@ -135,7 +135,7 @@
                         <DataTemplate x:DataType="controls:ChannelNode">
                             <TreeViewItem
                                 AutomationProperties.Name="{x:Bind Title, Mode=OneWay}"
-                                IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}"
+                                IsExpanded="{x:Bind IsExpanded}"
                                 ItemsSource="{x:Bind Children}">
                                 <Grid ColumnSpacing="8">
                                     <Grid.ColumnDefinitions>

@@ -55,11 +55,78 @@ public sealed partial class MainWindow : Window
         _client.SetDiscovery(active: true);
         _client.RefreshDevices();
 
+        StartSelfTestIfRequested();
+
         Closed += (_, _) =>
         {
             _client.SetDiscovery(active: false);
             _client.Dispose();
         };
+    }
+
+    // -----------------------------------------------------------------
+    // Headless self-test
+    //
+    // Mirrors the GTK sibling's TWINLEAF_SELFTEST_* hooks so CI can drive a
+    // real connect-and-plot cycle against the simulator without a human at the
+    // keyboard. Inert unless the variables are set.
+    // -----------------------------------------------------------------
+
+    private void StartSelfTestIfRequested()
+    {
+        var target = Environment.GetEnvironmentVariable("TWINLEAF_SELFTEST_CONNECT");
+        if (!string.IsNullOrWhiteSpace(target))
+        {
+            UrlBox.Text = target;
+            _client.Connect(target.Trim());
+
+            // Tick the first available column once metadata lands, so the test
+            // exercises the plot path and not just the connection.
+            _client.ConnectedDevices.CollectionChanged += SelfTestSelectFirstColumn;
+        }
+
+        var quitAfter = Environment.GetEnvironmentVariable("TWINLEAF_SELFTEST_QUIT");
+        if (double.TryParse(quitAfter, NumberStyles.Float, CultureInfo.InvariantCulture, out var seconds) && seconds > 0)
+        {
+            // Held in a field: a DispatcherQueueTimer with no rooted reference
+            // can be collected before it fires.
+            _selfTestQuitTimer = DispatcherQueue.CreateTimer();
+            var timer = _selfTestQuitTimer;
+            timer.Interval = TimeSpan.FromSeconds(seconds);
+            timer.IsRepeating = false;
+            timer.Tick += (_, _) =>
+            {
+                AppLog.Error(
+                    $"[selftest] quitting after {seconds}s; frames={_selfTestFrameCount} " +
+                    $"sawData={_selfTestSawData} selected={_client.SelectedColumns.Count} " +
+                    $"devices={_client.ConnectedDevices.Count} phase={_client.Phase}");
+                Console.Error.Flush();
+                // Close() only dismisses the window; Exit() ends the process,
+                // which is what an unattended run needs.
+                Application.Current.Exit();
+            };
+            timer.Start();
+        }
+    }
+
+    private int _selfTestFrameCount;
+    private bool _selfTestSawData;
+    private Microsoft.UI.Dispatching.DispatcherQueueTimer? _selfTestQuitTimer;
+
+    private void SelfTestSelectFirstColumn(object? sender, NotifyCollectionChangedEventArgs e)
+    {
+        var first = _client.ConnectedDevices
+            .SelectMany(device => device.Streams)
+            .SelectMany(stream => stream.Columns)
+            .FirstOrDefault();
+
+        if (first is null || _client.SelectedColumns.Count > 0)
+        {
+            return;
+        }
+
+        AppLog.Error($"[selftest] selecting {first.Key}");
+        _client.ToggleColumn(first.Key);
     }
 
     // -----------------------------------------------------------------
@@ -319,6 +386,20 @@ public sealed partial class MainWindow : Window
 
     private void OnPlotFrame(PlotFrame frame)
     {
+        _selfTestFrameCount++;
+        var points = frame.Series.Sum(item => item.Points.Count);
+        if (_selfTestFrameCount == 1 || (points > 0 && !_selfTestSawData))
+        {
+            _selfTestSawData |= points > 0;
+            AppLog.Error(
+                $"[selftest] frame {_selfTestFrameCount}: pane={frame.PaneId} mode={frame.Mode} " +
+                $"series={frame.Series.Count} points={points}" +
+                (points > 0
+                    ? $" x=[{frame.Series[0].Points[0].X:G6}..{frame.Series[0].Points[^1].X:G6}]" +
+                      $" y0={frame.Series[0].Points[0].Y:G6} rate={frame.Series[0].SampleRate:G6}"
+                    : string.Empty));
+        }
+
         // Pause freezes the display but leaves the core streaming, so resuming
         // shows current data rather than replaying a backlog.
         if (_isPaused)
