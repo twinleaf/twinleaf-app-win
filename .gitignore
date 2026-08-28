@@ -1,0 +1,16 @@
+# Rust
+rust/tio-bridge/target/
+
+# .NET / WinUI
+[Bb]in/
+[Oo]bj/
+*.user
+.vs/
+packaging/windows/*.msix
+packaging/windows/*.msixbundle
+
+# Build output
+dist/
+
+# The vendored core is a submodule; its build output is not ours
+vendor/twinleaf-rust/target/

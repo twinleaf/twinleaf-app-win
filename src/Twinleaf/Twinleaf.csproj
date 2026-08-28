@@ -1,0 +1,83 @@
+<Project Sdk="Microsoft.NET.Sdk">
+
+  <PropertyGroup>
+    <!-- WinUI 3 desktop. 19041 is the Windows App SDK's minimum supported target. -->
+    <!-- WinExe, not Exe: a GUI app must not allocate a console window. -->
+    <OutputType>WinExe</OutputType>
+    <TargetFramework>net9.0-windows10.0.19041.0</TargetFramework>
+    <TargetPlatformMinVersion>10.0.19041.0</TargetPlatformMinVersion>
+    <SupportedOSPlatformVersion>10.0.19041.0</SupportedOSPlatformVersion>
+    <RootNamespace>Twinleaf</RootNamespace>
+    <AssemblyName>Twinleaf</AssemblyName>
+    <ApplicationManifest>app.manifest</ApplicationManifest>
+    <Platforms>x64;ARM64</Platforms>
+    <RuntimeIdentifiers>win-x64;win-arm64</RuntimeIdentifiers>
+    <UseWinUI>true</UseWinUI>
+    <Nullable>enable</Nullable>
+    <LangVersion>latest</LangVersion>
+    <ImplicitUsings>disable</ImplicitUsings>
+    <AllowUnsafeBlocks>true</AllowUnsafeBlocks>
+    <TreatWarningsAsErrors>true</TreatWarningsAsErrors>
+
+    <!--
+      Unpackaged, self-contained. Users of a lab instrument app expect to unzip
+      and run: no MSIX install, no separately-installed Windows App SDK runtime,
+      no .NET runtime prerequisite. Packaging/ builds the MSIX for anyone who
+      wants the installed form instead.
+    -->
+    <WindowsPackageType>None</WindowsPackageType>
+    <WindowsAppSDKSelfContained>true</WindowsAppSDKSelfContained>
+    <SelfContained>true</SelfContained>
+    <EnableMsixTooling>true</EnableMsixTooling>
+
+    <!--
+      The plot canvas hands Win2D large point arrays every frame; the server GC's
+      background collection keeps those out of the render path.
+    -->
+    <ServerGarbageCollection>false</ServerGarbageCollection>
+    <ConcurrentGarbageCollection>true</ConcurrentGarbageCollection>
+  </PropertyGroup>
+
+  <ItemGroup>
+    <PackageReference Include="Microsoft.WindowsAppSDK" Version="1.7.*" />
+    <PackageReference Include="Microsoft.Windows.SDK.BuildTools" Version="10.0.26100.*" />
+    <!-- Direct2D-backed drawing for the plot canvas. -->
+    <PackageReference Include="Microsoft.Graphics.Win2D" Version="1.3.*" />
+  </ItemGroup>
+
+  <ItemGroup>
+    <Content Include="Assets\**" CopyToOutputDirectory="PreserveNewest" />
+  </ItemGroup>
+
+  <!--
+    Build the Rust core and stage twinleaf_core.dll next to the app, the way the
+    macOS app's Xcode run-script phase embeds libtwinleaf_core.dylib into
+    Contents/Frameworks. Set TwinleafSkipRustBuild=true to reuse the last build.
+  -->
+  <PropertyGroup>
+    <TwinleafRustDir>$(MSBuildThisFileDirectory)..\..\rust\tio-bridge</TwinleafRustDir>
+    <TwinleafRustProfile Condition="'$(Configuration)' == 'Debug'">debug</TwinleafRustProfile>
+    <TwinleafRustProfile Condition="'$(Configuration)' != 'Debug'">release</TwinleafRustProfile>
+    <TwinleafRustFlags Condition="'$(Configuration)' != 'Debug'">--release</TwinleafRustFlags>
+  </PropertyGroup>
+
+  <Target Name="BuildTwinleafCore" BeforeTargets="BeforeBuild" Condition="'$(TwinleafSkipRustBuild)' != 'true'">
+    <Message Importance="high" Text="Building Rust core ($(TwinleafRustProfile))..." />
+    <Exec Command="cargo build --lib $(TwinleafRustFlags)" WorkingDirectory="$(TwinleafRustDir)" />
+  </Target>
+
+  <Target Name="StageTwinleafCore" AfterTargets="BuildTwinleafCore" BeforeTargets="BeforeBuild">
+    <ItemGroup>
+      <TwinleafCoreLibrary Include="$(TwinleafRustDir)\target\$(TwinleafRustProfile)\twinleaf_core.dll" />
+    </ItemGroup>
+    <Error Condition="!Exists('%(TwinleafCoreLibrary.FullPath)')"
+           Text="twinleaf_core.dll not found at %(TwinleafCoreLibrary.FullPath). Run 'cargo build --lib' in rust/tio-bridge." />
+    <ItemGroup>
+      <Content Include="@(TwinleafCoreLibrary)">
+        <Link>twinleaf_core.dll</Link>
+        <CopyToOutputDirectory>PreserveNewest</CopyToOutputDirectory>
+      </Content>
+    </ItemGroup>
+  </Target>
+
+</Project>

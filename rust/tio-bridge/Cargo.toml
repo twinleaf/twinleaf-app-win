@@ -1,0 +1,41 @@
+[package]
+name = "tio-bridge"
+version = "0.1.0"
+edition = "2021"
+license = "Apache-2.0"
+
+[lib]
+name = "twinleaf_core"
+crate-type = ["cdylib", "staticlib", "rlib"]
+path = "src/lib.rs"
+
+[features]
+default = ["serial", "firmware", "mdns"]
+serial = ["twinleaf/serial"]
+hdf5 = ["twinleaf/hdf5"]
+# Firmware update support: lazy availability check + flashing, backed by the
+# GitHub firmware catalog (pulls in an HTTP client + TLS via twinleaf).
+firmware = ["twinleaf/firmware-update"]
+# Network device discovery over mDNS/DNS-SD. Uses raw multicast sockets, which
+# require the multicast networking entitlement on macOS/iOS. Enabled on macOS;
+# omitted from the iOS build (that entitlement is approval-gated).
+mdns = ["twinleaf/mdns"]
+
+# Full debug info in release builds, packed into .dSYM bundles next to the
+# artifacts. App Store Connect requires matching dSYMs for every binary in an
+# uploaded archive; the binaries themselves stay lean (DWARF lives in the
+# dSYM, not the dylib/executable).
+[profile.release]
+debug = "full"
+split-debuginfo = "packed"
+strip = "none"
+
+[dependencies]
+crossbeam = "0.8"
+log = "0.4"
+serde = { version = "1", features = ["derive"] }
+serde_json = "1"
+twinleaf = { version = "2.0", path = "../../vendor/twinleaf-rust/twinleaf", default-features = false }
+# Lib target only, for tui::spectral (Welch estimator + noise floor). Pulls the
+# tools' CLI/TUI dependency stack along; none of it is invoked.
+twinleaf-tools = { version = "2.4", path = "../../vendor/twinleaf-rust/twinleaf-tools", default-features = false }

@@ -1,0 +1,214 @@
+<?xml version="1.0" encoding="utf-8"?>
+<Window
+    x:Class="Twinleaf.MainWindow"
+    xmlns="http://schemas.microsoft.com/winfx/2006/xaml/presentation"
+    xmlns:x="http://schemas.microsoft.com/winfx/2006/xaml"
+    xmlns:controls="using:Twinleaf.Controls"
+    xmlns:d="http://schemas.microsoft.com/expression/blend/2008"
+    xmlns:mc="http://schemas.openxmlformats.org/markup-compatibility/2006"
+    mc:Ignorable="d">
+
+    <Grid x:Name="RootGrid" Background="{ThemeResource ApplicationPageBackgroundThemeBrush}">
+        <Grid.RowDefinitions>
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="Auto" />
+            <RowDefinition Height="*" />
+            <RowDefinition Height="Auto" />
+        </Grid.RowDefinitions>
+
+        <!-- Draggable title bar region; the window uses an extended client area. -->
+        <Grid x:Name="AppTitleBar" Grid.Row="0" Height="40" Padding="12,0">
+            <TextBlock
+                x:Name="AppTitleText"
+                VerticalAlignment="Center"
+                Style="{StaticResource CaptionTextBlockStyle}"
+                Text="Twinleaf" />
+        </Grid>
+
+        <!-- Toolbar -->
+        <CommandBar
+            Grid.Row="1"
+            DefaultLabelPosition="Right"
+            IsOpen="False"
+            OverflowButtonVisibility="Collapsed">
+
+            <CommandBar.Content>
+                <StackPanel
+                    Orientation="Horizontal"
+                    Spacing="8"
+                    Margin="12,0,0,0"
+                    VerticalAlignment="Center">
+
+                    <ComboBox
+                        x:Name="DeviceCombo"
+                        MinWidth="320"
+                        PlaceholderText="No devices found"
+                        ToolTipService.ToolTip="Discovered devices (serial and network)" />
+
+                    <TextBox
+                        x:Name="UrlBox"
+                        MinWidth="220"
+                        PlaceholderText="or a URL, e.g. udp://127.0.0.1:7855"
+                        ToolTipService.ToolTip="Connect to an explicit Twinleaf URL" />
+
+                    <Button x:Name="ConnectButton" Click="OnConnectClicked" Style="{StaticResource AccentButtonStyle}">
+                        <StackPanel Orientation="Horizontal" Spacing="6">
+                            <FontIcon FontSize="14" Glyph="&#xE8C8;" />
+                            <TextBlock x:Name="ConnectButtonText" Text="Connect" />
+                        </StackPanel>
+                    </Button>
+                </StackPanel>
+            </CommandBar.Content>
+
+            <AppBarButton x:Name="RefreshButton" Click="OnRefreshClicked" Icon="Refresh" Label="Refresh" />
+            <AppBarSeparator />
+            <AppBarToggleButton x:Name="RecordButton" Click="OnRecordClicked" Label="Record">
+                <AppBarToggleButton.Icon>
+                    <FontIcon Glyph="&#xE7C8;" />
+                </AppBarToggleButton.Icon>
+            </AppBarToggleButton>
+            <AppBarToggleButton x:Name="PauseButton" Click="OnPauseClicked" Label="Pause">
+                <AppBarToggleButton.Icon>
+                    <FontIcon Glyph="&#xE769;" />
+                </AppBarToggleButton.Icon>
+            </AppBarToggleButton>
+            <AppBarSeparator />
+            <AppBarButton x:Name="ModeButton" Label="Mode">
+                <AppBarButton.Icon>
+                    <FontIcon Glyph="&#xE9D2;" />
+                </AppBarButton.Icon>
+                <AppBarButton.Flyout>
+                    <MenuFlyout>
+                        <RadioMenuFlyoutItem
+                            x:Name="TimeseriesModeItem"
+                            Click="OnModeSelected"
+                            GroupName="PlotMode"
+                            IsChecked="True"
+                            Tag="Timeseries"
+                            Text="Timeseries" />
+                        <RadioMenuFlyoutItem
+                            x:Name="FftModeItem"
+                            Click="OnModeSelected"
+                            GroupName="PlotMode"
+                            Tag="Fft"
+                            Text="FFT" />
+                    </MenuFlyout>
+                </AppBarButton.Flyout>
+            </AppBarButton>
+            <AppBarButton x:Name="WindowButton" Label="Window">
+                <AppBarButton.Icon>
+                    <FontIcon Glyph="&#xE916;" />
+                </AppBarButton.Icon>
+                <AppBarButton.Flyout>
+                    <MenuFlyout x:Name="WindowFlyout" />
+                </AppBarButton.Flyout>
+            </AppBarButton>
+        </CommandBar>
+
+        <!-- Sidebar + plot -->
+        <Grid Grid.Row="2">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition x:Name="SidebarColumn" Width="300" MinWidth="220" />
+                <ColumnDefinition Width="Auto" />
+                <ColumnDefinition Width="*" MinWidth="320" />
+            </Grid.ColumnDefinitions>
+
+            <!-- Channel sidebar: device > stream > column, ticked to plot -->
+            <Grid Grid.Column="0">
+                <Grid.RowDefinitions>
+                    <RowDefinition Height="Auto" />
+                    <RowDefinition Height="*" />
+                </Grid.RowDefinitions>
+
+                <TextBlock
+                    Grid.Row="0"
+                    Margin="12,8"
+                    Style="{StaticResource BodyStrongTextBlockStyle}"
+                    Text="Channels" />
+
+                <TreeView
+                    x:Name="ChannelTree"
+                    Grid.Row="1"
+                    Margin="4,0,4,8"
+                    SelectionMode="None">
+                    <TreeView.ItemTemplate>
+                        <DataTemplate x:DataType="controls:ChannelNode">
+                            <TreeViewItem
+                                AutomationProperties.Name="{x:Bind Title, Mode=OneWay}"
+                                IsExpanded="{x:Bind IsExpanded, Mode=TwoWay}"
+                                ItemsSource="{x:Bind Children}">
+                                <Grid ColumnSpacing="8">
+                                    <Grid.ColumnDefinitions>
+                                        <ColumnDefinition Width="Auto" />
+                                        <ColumnDefinition Width="*" />
+                                        <ColumnDefinition Width="Auto" />
+                                    </Grid.ColumnDefinitions>
+
+                                    <CheckBox
+                                        Grid.Column="0"
+                                        MinWidth="0"
+                                        Checked="OnChannelChecked"
+                                        Unchecked="OnChannelChecked"
+                                        IsChecked="{x:Bind IsSelected, Mode=TwoWay}"
+                                        Tag="{x:Bind}"
+                                        Visibility="{x:Bind CheckboxVisibility}" />
+
+                                    <TextBlock
+                                        Grid.Column="1"
+                                        VerticalAlignment="Center"
+                                        Text="{x:Bind Title, Mode=OneWay}"
+                                        TextTrimming="CharacterEllipsis"
+                                        ToolTipService.ToolTip="{x:Bind Detail, Mode=OneWay}" />
+
+                                    <TextBlock
+                                        Grid.Column="2"
+                                        VerticalAlignment="Center"
+                                        FontFamily="Consolas"
+                                        Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                                        Style="{StaticResource CaptionTextBlockStyle}"
+                                        Text="{x:Bind Value, Mode=OneWay}" />
+                                </Grid>
+                            </TreeViewItem>
+                        </DataTemplate>
+                    </TreeView.ItemTemplate>
+                </TreeView>
+            </Grid>
+
+            <controls:SplitterThumb
+                x:Name="SidebarSplitter"
+                Grid.Column="1"
+                TargetColumn="{x:Bind SidebarColumn}" />
+
+            <!-- Plot -->
+            <controls:PlotView x:Name="Plot" Grid.Column="2" Margin="0,0,8,8" />
+        </Grid>
+
+        <!-- Status bar -->
+        <Grid
+            Grid.Row="3"
+            Padding="12,6"
+            Background="{ThemeResource LayerFillColorDefaultBrush}"
+            BorderBrush="{ThemeResource DividerStrokeColorDefaultBrush}"
+            BorderThickness="0,1,0,0"
+            ColumnSpacing="12">
+            <Grid.ColumnDefinitions>
+                <ColumnDefinition Width="*" />
+                <ColumnDefinition Width="Auto" />
+            </Grid.ColumnDefinitions>
+
+            <TextBlock
+                x:Name="StatusText"
+                Grid.Column="0"
+                Style="{StaticResource CaptionTextBlockStyle}"
+                Text="Idle"
+                TextTrimming="CharacterEllipsis" />
+
+            <TextBlock
+                x:Name="RecordingText"
+                Grid.Column="1"
+                FontFamily="Consolas"
+                Foreground="{ThemeResource TextFillColorSecondaryBrush}"
+                Style="{StaticResource CaptionTextBlockStyle}" />
+        </Grid>
+    </Grid>
+</Window>
