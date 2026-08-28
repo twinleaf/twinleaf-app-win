@@ -292,9 +292,12 @@ public sealed partial class PlotView : UserControl
 
             session.DrawLine(x, top, x, bottom, palette.Grid, 1);
 
+            // Draw the measured layout rather than re-issuing DrawText with the
+            // same string: this runs on every frame while streaming, and
+            // DrawText would lay the text out a second time just to place it.
             using var layout = new CanvasTextLayout(session, label, format, 200, 20);
             var textWidth = (float)layout.LayoutBounds.Width;
-            session.DrawText(label, x - textWidth / 2, bottom + 4, palette.AxisText, format);
+            session.DrawTextLayout(layout, x - textWidth / 2, bottom + 4, palette.AxisText);
         }
 
         foreach (var (value, label) in yTicks)
@@ -310,7 +313,7 @@ public sealed partial class PlotView : UserControl
             using var layout = new CanvasTextLayout(session, label, format, 200, 20);
             var textWidth = (float)layout.LayoutBounds.Width;
             var textHeight = (float)layout.LayoutBounds.Height;
-            session.DrawText(label, left - 8 - textWidth, y - textHeight / 2, palette.AxisText, format);
+            session.DrawTextLayout(layout, left - 8 - textWidth, y - textHeight / 2, palette.AxisText);
         }
     }
 

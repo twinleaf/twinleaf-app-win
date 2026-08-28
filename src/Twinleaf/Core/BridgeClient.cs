@@ -311,6 +311,13 @@ public sealed class BridgeClient : INotifyPropertyChanged, IDisposable
 
             case CoreEvent.ActiveColumns active:
                 // The core is authoritative: it may drop columns it cannot serve.
+                //
+                // Careful when derived channels get wired up: the typed-event
+                // column key has no derivation field (only the plot frame does),
+                // so every key here decodes as a raw column. Taking this list
+                // wholesale would silently rewrite a selected derived channel
+                // into its source. Reconcile against the outgoing selection then
+                // rather than replacing it.
                 _selectedColumns.Clear();
                 _selectedColumns.AddRange(active.Columns);
                 SelectionChanged?.Invoke();
