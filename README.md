@@ -120,3 +120,11 @@ layout with drag-and-drop, and preferences.
 
 Apache-2.0. Vendored dependencies retain their own licenses; `vendor/twinleaf-rust`
 is MIT/Apache-2.0.
+
+## Shared code
+
+[docs/shared-core.md](docs/shared-core.md) records which parts of the core are
+app code and which are library code sitting in the wrong crate — including a
+measured case for moving `spectral` out of `twinleaf-tools`, which would roughly
+halve the app's dependency graph. It applies to the macOS app equally, since
+both build the same core.
