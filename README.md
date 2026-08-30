@@ -3,7 +3,8 @@
 A native Windows app for discovering, streaming, plotting, logging and
 configuring Twinleaf quantum sensors.
 
-This is the Windows sibling of the macOS/iPadOS [`twinleaf-app`](../twinleaf-app),
+This is the Windows sibling of the macOS/iPadOS
+[`twinleaf-app`](https://github.com/twinleaf/twinleaf-app),
 built the same way: a **native platform UI** over the **same Rust core**, with a
 C ABI between them.
 
@@ -166,9 +167,9 @@ Working end to end:
 which wants `cmake`); the default build reports plainly that HDF5 is unavailable
 rather than failing silently.
 
-Not yet ported from the macOS app: firmware-update popover, multi-pane layout
-with drag-and-drop, RPC sliders, favourites, the capture *viewer* (the capture
-trigger works), stream-health popover, and preferences.
+Not yet ported from the macOS app: multi-pane layout with drag-and-drop, RPC
+sliders, favourites, the capture *viewer* (the capture trigger works), and
+preferences.
 
 ## Network access
 
