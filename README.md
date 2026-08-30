@@ -171,6 +171,16 @@ Not yet ported from the macOS app: multi-pane layout with drag-and-drop, RPC
 sliders, favourites, the capture *viewer* (the capture trigger works), and
 preferences.
 
+## Releases
+
+Pushing a `vX.Y.Z` tag runs [release.yml](.github/workflows/release.yml): CI
+builds the self-contained app with HDF5 enabled, signs `Twinleaf.exe` and
+`twinleaf_core.dll` through the org's Azure Trusted Signing profile, and drafts
+a GitHub release carrying the zip — published after a human looks at it. The
+workflow can also be dispatched from the Actions tab, which stops at an
+uploaded artifact (unsigned if signing secrets are absent) without touching
+releases.
+
 ## Network access
 
 After a session starts streaming, **the core** checks whether newer published

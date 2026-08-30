@@ -1,0 +1,123 @@
+name: release
+
+# Pushing a v* tag builds, signs and drafts a GitHub release; the draft is
+# published by hand after a look at the artifact. workflow_dispatch runs the
+# same build and stops at an uploaded artifact, for testing the pipeline
+# without cutting a release.
+on:
+  push:
+    tags: ['v*']
+  workflow_dispatch:
+
+permissions:
+  contents: write
+
+jobs:
+  build:
+    runs-on: windows-latest
+    env:
+      PUBLISH_DIR: src/Twinleaf/bin/Release/net9.0-windows10.0.19041.0/win-x64/publish
+      # Secrets are not readable from `if:` expressions, so surface presence
+      # through env. Signing reuses the org's Azure Trusted Signing setup
+      # (the same secret names as twinleaf/trendline).
+      HAVE_SIGNING: ${{ secrets.AZURE_TENANT_ID != '' }}
+
+    steps:
+      - uses: actions/checkout@v7
+        with:
+          submodules: recursive
+
+      - uses: dtolnay/rust-toolchain@stable
+
+      - uses: swatinem/rust-cache@v2
+        with:
+          workspaces: './rust/tio-bridge -> target'
+
+      - uses: actions/setup-dotnet@v4
+        with:
+          dotnet-version: 9.0.x
+
+      # HDF5 export needs the core built with its feature; the runner ships the
+      # cmake that the HDF5 build wants. The csproj's own Rust step builds
+      # without features, so build here and tell the csproj to reuse it.
+      - name: Build Rust core (release, with HDF5)
+        working-directory: rust/tio-bridge
+        run: cargo build --lib --release --features hdf5
+
+      - name: Publish app (self-contained, win-x64)
+        run: dotnet publish src/Twinleaf/Twinleaf.csproj -c Release -r win-x64 -p:TwinleafSkipRustBuild=true
+
+      - name: Require signing on release builds
+        if: startsWith(github.ref, 'refs/tags/') && env.HAVE_SIGNING != 'true'
+        run: |
+          throw "Refusing to draft an unsigned release: the AZURE_* Trusted Signing secrets are not visible to this repository. Grant this repo access to the org secrets (or copy them from twinleaf/trendline)."
+
+      # Only the first-party binaries get signed; everything else in the
+      # self-contained folder already carries Microsoft's signature. Signatures
+      # don't care where the file sits, so sign copies and put them back.
+      - name: Stage first-party binaries for signing
+        if: env.HAVE_SIGNING == 'true'
+        run: |
+          New-Item -ItemType Directory -Force signing | Out-Null
+          Copy-Item "$env:PUBLISH_DIR/Twinleaf.exe", "$env:PUBLISH_DIR/twinleaf_core.dll" signing/
+
+      - name: Sign (Azure Trusted Signing)
+        if: env.HAVE_SIGNING == 'true'
+        uses: azure/trusted-signing-action@v2
+        with:
+          azure-tenant-id: ${{ secrets.AZURE_TENANT_ID }}
+          azure-client-id: ${{ secrets.AZURE_CLIENT_ID }}
+          azure-client-secret: ${{ secrets.AZURE_CLIENT_SECRET }}
+          endpoint: ${{ secrets.AZURE_ENDPOINT }}
+          trusted-signing-account-name: ${{ secrets.AZURE_CODE_SIGNING_NAME }}
+          certificate-profile-name: ${{ secrets.AZURE_CERT_PROFILE_NAME }}
+          files-folder: ${{ github.workspace }}\signing
+          files-folder-filter: exe,dll
+          file-digest: SHA256
+          timestamp-rfc3161: http://timestamp.acs.microsoft.com
+          timestamp-digest: SHA256
+
+      - name: Return signed binaries
+        if: env.HAVE_SIGNING == 'true'
+        run: Copy-Item signing/* "$env:PUBLISH_DIR/" -Force
+
+      - name: Verify signatures (release builds)
+        if: startsWith(github.ref, 'refs/tags/')
+        run: |
+          foreach ($f in 'Twinleaf.exe', 'twinleaf_core.dll') {
+            $sig = Get-AuthenticodeSignature "$env:PUBLISH_DIR/$f"
+            if ($sig.Status -ne 'Valid') { throw "$f is not validly signed: $($sig.Status)" }
+            Write-Host "$f signed by $($sig.SignerCertificate.Subject)"
+          }
+
+      - name: Compute artifact name
+        run: |
+          if ($env:GITHUB_REF -like 'refs/tags/*') {
+            $version = $env:GITHUB_REF_NAME -replace '^v', ''
+          } else {
+            $version = $env:GITHUB_SHA.Substring(0, 7)
+          }
+          "ARTIFACT=Twinleaf-$version-win-x64" | Out-File -FilePath $env:GITHUB_ENV -Append -Encoding utf8
+
+      # A top-level Twinleaf/ folder inside the zip, so unzip-and-run doesn't
+      # scatter two hundred files into Downloads.
+      - name: Zip the app folder
+        run: |
+          New-Item -ItemType Directory -Force dist/Twinleaf | Out-Null
+          Copy-Item -Recurse "$env:PUBLISH_DIR/*" dist/Twinleaf/
+          7z a -tzip "dist/$env:ARTIFACT.zip" .\dist\Twinleaf
+
+      - uses: actions/upload-artifact@v7
+        with:
+          name: ${{ env.ARTIFACT }}
+          path: dist/*.zip
+          if-no-files-found: error
+
+      - name: Draft GitHub release
+        if: startsWith(github.ref, 'refs/tags/')
+        uses: softprops/action-gh-release@v3
+        with:
+          draft: true
+          generate_release_notes: true
+          files: dist/*.zip
+          fail_on_unmatched_files: true
